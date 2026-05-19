@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EDA Engine — AI-Accelerated P&amp;R</title>
+<style>
+/* ── Reset & root ─────────────────────────────────────────────────────────── */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg:       #0f0f1a;
+  --panel:    #16162a;
+  --grid:     #1e1e3a;
+  --text:     #e0e0ff;
+  --dim:      #888899;
+  --emerald:  #00C97A;
+  --amber:    #FF8C00;
+  --gold:     #FFD700;
+  --blue:     #1E90FF;
+  --cyan:     #00CED1;
+  --violet:   #9370DB;
+  --red:      #FF4444;
+  --border:   #2a2a4a;
+  font-size: 13px;
+}
+html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace; }
+
+/* ── Layout ───────────────────────────────────────────────────────────────── */
+.app {
+  display: grid;
+  grid-template-rows: 48px 1fr;
+  grid-template-columns: 300px 1fr 290px;
+  height: 100vh;
+}
+.header { grid-column: 1 / -1; background: var(--panel); border-bottom: 1px solid var(--border); display: flex; align-items: center; padding: 0 18px; gap: 14px; }
+.sidebar-left  { border-right: 1px solid var(--border); overflow-y: auto; display: flex; flex-direction: column; gap: 14px; padding: 14px; background: var(--bg); }
+.canvas-wrap   { overflow: hidden; display: flex; flex-direction: column; background: var(--bg); }
+.sidebar-right { border-left: 1px solid var(--border); overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding: 14px; background: var(--bg); }
+
+/* ── Header ───────────────────────────────────────────────────────────────── */
+.logo { display: flex; align-items: center; gap: 8px; }
+.logo svg { flex-shrink: 0; }
+.logo-text { font-size: 14px; font-weight: 700; color: var(--text); letter-spacing: 0.5px; }
+.logo-text span { color: var(--emerald); }
+.header-sub { font-size: 11px; color: var(--dim); }
+.header-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+.badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 600;
+  transition: background 0.2s, color 0.2s;
+}
+.badge-dot { width: 7px; height: 7px; border-radius: 50%; }
+.badge.idle     { background: var(--grid); color: var(--dim); }
+.badge.idle     .badge-dot { background: var(--dim); }
+.badge.running  { background: #2a1a00; color: var(--amber); }
+.badge.running  .badge-dot { background: var(--amber); animation: pulse 1s infinite; }
+.badge.complete { background: #001a0e; color: var(--emerald); }
+.badge.complete .badge-dot { background: var(--emerald); }
+.badge.error    { background: #200000; color: var(--red); }
+.badge.error    .badge-dot { background: var(--red); }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+/* ── Cards / panels ───────────────────────────────────────────────────────── */
+.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+.panel-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--dim); margin-bottom: 10px; }
+
+/* ── Prompt area ──────────────────────────────────────────────────────────── */
+textarea {
+  width: 100%; resize: vertical; min-height: 72px; max-height: 160px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); font-family: inherit; font-size: 12px;
+  padding: 8px 10px; outline: none; line-height: 1.5;
+  transition: border-color 0.15s;
+}
+textarea:focus { border-color: var(--emerald); }
+textarea::placeholder { color: var(--dim); }
+
+.btn-generate {
+  width: 100%; padding: 9px; border-radius: 6px; font-family: inherit;
+  font-size: 12px; font-weight: 700; cursor: pointer; border: none;
+  background: var(--emerald); color: #001a0e;
+  transition: opacity 0.15s, transform 0.1s;
+}
+.btn-generate:hover  { opacity: 0.88; }
+.btn-generate:active { transform: scale(0.98); }
+.btn-generate:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* ── Pipeline steps ───────────────────────────────────────────────────────── */
+.steps { display: flex; flex-direction: column; gap: 6px; }
+.step { display: flex; align-items: flex-start; gap: 10px; padding: 8px; border-radius: 6px; background: var(--bg); border: 1px solid var(--border); transition: border-color 0.2s, background 0.2s; }
+.step.running  { border-color: var(--amber); background: #100c00; }
+.step.complete { border-color: var(--emerald); background: #00100a; }
+.step.error    { border-color: var(--red); background: #100000; }
+.step-icon {
+  width: 20px; height: 20px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; font-weight: 700;
+  background: var(--grid); color: var(--dim);
+  transition: background 0.2s, color 0.2s;
+}
+.step.running  .step-icon { background: var(--amber); color: #000; animation: pulse 1s infinite; }
+.step.complete .step-icon { background: var(--emerald); color: #000; }
+.step.error    .step-icon { background: var(--red); color: #fff; }
+.step-body { flex: 1; min-width: 0; }
+.step-name { font-size: 11px; font-weight: 600; color: var(--text); }
+.step-msg  { font-size: 10px; color: var(--dim); margin-top: 2px; word-break: break-word; line-height: 1.4; }
+.step.complete .step-msg { color: var(--emerald); }
+.step.error    .step-msg { color: var(--red); }
+
+/* ── Canvas ───────────────────────────────────────────────────────────────── */
+.canvas-title { padding: 8px 14px; font-size: 11px; font-weight: 700; color: var(--dim); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
+.canvas-title span { color: var(--text); }
+#circuit-svg-container {
+  flex: 1; overflow: hidden; display: flex; align-items: center; justify-content: center;
+  padding: 10px;
+}
+#circuit-svg {
+  max-width: 100%; max-height: 100%;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+}
+.canvas-placeholder {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px; color: var(--dim); font-size: 12px; text-align: center;
+  width: 100%; height: 100%;
+}
+.canvas-placeholder svg { opacity: 0.3; }
+
+/* ── Metrics cards ────────────────────────────────────────────────────────── */
+.metrics-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.metric-card {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px 10px;
+}
+.metric-label { font-size: 9px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--dim); margin-bottom: 4px; }
+.metric-value { font-size: 17px; font-weight: 700; color: var(--text); }
+.metric-unit  { font-size: 10px; color: var(--dim); font-weight: 400; }
+.metric-card.warn .metric-value { color: var(--red); }
+.metric-card.ok   .metric-value { color: var(--emerald); }
+
+/* ── DRC panel ────────────────────────────────────────────────────────────── */
+.drc-list { display: flex; flex-direction: column; gap: 5px; }
+.drc-item { font-size: 11px; display: flex; align-items: flex-start; gap: 6px; line-height: 1.45; }
+.drc-pass { color: var(--emerald); }
+.drc-fail { color: var(--red); }
+.drc-icon { flex-shrink: 0; margin-top: 1px; font-size: 12px; }
+
+/* ── JSON viewer ──────────────────────────────────────────────────────────── */
+.json-viewer {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+  font-size: 10px; color: var(--dim); max-height: 200px; overflow-y: auto;
+  padding: 8px; line-height: 1.5; white-space: pre-wrap; word-break: break-all;
+}
+details summary { cursor: pointer; font-size: 10px; color: var(--dim); user-select: none; }
+details summary:hover { color: var(--text); }
+details[open] summary { color: var(--text); }
+
+/* ── Scrollbar ────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ── Header ──────────────────────────────────────────────────────────── -->
+  <header class="header">
+    <div class="logo">
+      <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+        <rect width="28" height="28" rx="6" fill="url(#lg)"/>
+        <defs><linearGradient id="lg" x1="0" y1="0" x2="28" y2="28" gradientUnits="userSpaceOnUse">
+          <stop stop-color="#0EA5E9"/><stop offset="1" stop-color="#34D399"/>
+        </linearGradient></defs>
+        <rect x="9" y="9" width="10" height="10" rx="2" stroke="#0f172a" stroke-width="1.5" fill="none"/>
+        <line x1="14" y1="5" x2="14" y2="9" stroke="#0f172a" stroke-width="1.5" stroke-linecap="round"/>
+        <line x1="14" y1="19" x2="14" y2="23" stroke="#0f172a" stroke-width="1.5" stroke-linecap="round"/>
+        <line x1="5" y1="14" x2="9" y2="14" stroke="#0f172a" stroke-width="1.5" stroke-linecap="round"/>
+        <line x1="19" y1="14" x2="23" y2="14" stroke="#0f172a" stroke-width="1.5" stroke-linecap="round"/>
+      </svg>
+      <div>
+        <div class="logo-text">EDA <span>Engine</span></div>
+        <div class="header-sub">AI-Accelerated P&amp;R</div>
+      </div>
+    </div>
+    <div class="header-right">
+      <div id="status-badge" class="badge idle">
+        <span class="badge-dot"></span>
+        <span id="badge-text">Ready</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── Left sidebar ──────────────────────────────────────────────────────── -->
+  <aside class="sidebar-left">
+
+    <!-- Prompt -->
+    <div class="panel">
+      <div class="panel-title">Circuit Prompt</div>
+      <textarea id="prompt-input" placeholder="E.g. Connect an ESP32 to an LED via a 330 ohm resistor">Connect an ESP32 to a status LED via a 330 ohm resistor</textarea>
+      <br><br>
+      <button id="btn-generate" class="btn-generate" onclick="startGenerate()">Generate Circuit</button>
+    </div>
+
+    <!-- Pipeline steps -->
+    <div class="panel">
+      <div class="panel-title">Pipeline Progress</div>
+      <div class="steps">
+        <div class="step" id="step-0">
+          <div class="step-icon">0</div>
+          <div class="step-body">
+            <div class="step-name">LLM Translation</div>
+            <div class="step-msg" id="step-0-msg">Groq API → JSON Netlist</div>
+          </div>
+        </div>
+        <div class="step" id="step-1">
+          <div class="step-icon">1</div>
+          <div class="step-body">
+            <div class="step-name">Graph Builder</div>
+            <div class="step-msg" id="step-1-msg">Parse → CircuitGraph</div>
+          </div>
+        </div>
+        <div class="step" id="step-2">
+          <div class="step-icon">2</div>
+          <div class="step-body">
+            <div class="step-name">GA Optimizer</div>
+            <div class="step-msg" id="step-2-msg">Minimize HPWL</div>
+          </div>
+        </div>
+        <div class="step" id="step-3">
+          <div class="step-icon">3</div>
+          <div class="step-body">
+            <div class="step-name">Maze Router</div>
+            <div class="step-msg" id="step-3-msg">Lee's Algorithm</div>
+          </div>
+        </div>
+        <div class="step" id="step-4">
+          <div class="step-icon">4</div>
+          <div class="step-body">
+            <div class="step-name">Analytics</div>
+            <div class="step-msg" id="step-4-msg">EEE Metrics</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </aside>
+
+  <!-- ── Canvas ────────────────────────────────────────────────────────────── -->
+  <main class="canvas-wrap">
+    <div class="canvas-title">
+      <span id="canvas-title-text">Circuit Layout</span>
+    </div>
+    <div id="circuit-svg-container">
+      <div class="canvas-placeholder" id="canvas-placeholder">
+        <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
+          <rect x="4" y="4" width="56" height="56" rx="8" stroke="#1e1e3a" stroke-width="2"/>
+          <rect x="20" y="20" width="24" height="24" rx="4" stroke="#1e1e3a" stroke-width="2"/>
+          <line x1="32" y1="4" x2="32" y2="20" stroke="#1e1e3a" stroke-width="2" stroke-dasharray="3 3"/>
+          <line x1="32" y1="44" x2="32" y2="60" stroke="#1e1e3a" stroke-width="2" stroke-dasharray="3 3"/>
+          <line x1="4"  y1="32" x2="20" y2="32" stroke="#1e1e3a" stroke-width="2" stroke-dasharray="3 3"/>
+          <line x1="44" y1="32" x2="60" y2="32" stroke="#1e1e3a" stroke-width="2" stroke-dasharray="3 3"/>
+        </svg>
+        <div>Enter a prompt and click <strong>Generate Circuit</strong></div>
+      </div>
+      <svg id="circuit-svg" style="display:none;" xmlns="http://www.w3.org/2000/svg"></svg>
+    </div>
+  </main>
+
+  <!-- ── Right sidebar ──────────────────────────────────────────────────────── -->
+  <aside class="sidebar-right">
+
+    <!-- Metrics -->
+    <div class="panel">
+      <div class="panel-title">Routing Metrics</div>
+      <div class="metrics-grid">
+        <div class="metric-card" id="card-traces">
+          <div class="metric-label">Total Traces</div>
+          <div class="metric-value" id="m-traces">—</div>
+        </div>
+        <div class="metric-card" id="card-length">
+          <div class="metric-label">Trace Length</div>
+          <div class="metric-value" id="m-length">—</div>
+        </div>
+        <div class="metric-card" id="card-crossings">
+          <div class="metric-label">Crossings</div>
+          <div class="metric-value" id="m-crossings">—</div>
+        </div>
+        <div class="metric-card" id="card-completion">
+          <div class="metric-label">Completion</div>
+          <div class="metric-value" id="m-completion">—</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Electrical metrics -->
+    <div class="panel">
+      <div class="panel-title">Electrical Properties</div>
+      <div class="metrics-grid">
+        <div class="metric-card">
+          <div class="metric-label">Resistance</div>
+          <div class="metric-value" id="m-res">—</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-label">Capacitance</div>
+          <div class="metric-value" id="m-cap">—</div>
+        </div>
+        <div class="metric-card" style="grid-column:1/-1">
+          <div class="metric-label">Max Signal Delay</div>
+          <div class="metric-value" id="m-delay">—</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- DRC -->
+    <div class="panel">
+      <div class="panel-title">EEE Rule Check</div>
+      <div class="drc-list" id="drc-list">
+        <div class="drc-item drc-pass">
+          <span class="drc-icon">·</span>
+          <span>Awaiting result...</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Raw netlist JSON -->
+    <div class="panel">
+      <details>
+        <summary class="panel-title" style="margin-bottom:0">Raw Netlist JSON ▾</summary>
+        <br>
+        <div class="json-viewer" id="json-viewer">No netlist yet.</div>
+      </details>
+    </div>
+
+  </aside>
+</div>
+
+<script>
+// ── State ────────────────────────────────────────────────────────────────────
+let _ws = null;
+
+// ── Constants ────────────────────────────────────────────────────────────────
+const COMP_COLORS = {
+  MCU:       '#1E90FF',
+  RESISTOR:  '#FF8C00',
+  CAPACITOR: '#00CED1',
+  LED:       '#FFD700',
+  IC:        '#9370DB',
+  POWER:     '#FF4444',
+};
+const TRACE_COLORS = { POWER: '#FFD700', GROUND: '#888888', SIGNAL: '#00C97A' };
+const TRACE_WIDTHS = { POWER: 0.13, GROUND: 0.10, SIGNAL: 0.08 };
+
+// ── UI helpers ───────────────────────────────────────────────────────────────
+function setBadge(state) {
+  const el = document.getElementById('status-badge');
+  const txt = document.getElementById('badge-text');
+  el.className = 'badge ' + state;
+  const labels = { idle:'Ready', running:'Processing...', complete:'Complete', error:'Error' };
+  txt.textContent = labels[state] || state;
+}
+
+function resetSteps() {
+  for (let i = 0; i < 5; i++) {
+    const s = document.getElementById('step-' + i);
+    const m = document.getElementById('step-' + i + '-msg');
+    s.className = 'step';
+    const names = ['Groq API → JSON Netlist','Parse → CircuitGraph','Minimize HPWL','Lee\'s Algorithm','EEE Metrics'];
+    m.textContent = names[i];
+  }
+}
+
+function setStep(phase, status, msg) {
+  const s = document.getElementById('step-' + phase);
+  const m = document.getElementById('step-' + phase + '-msg');
+  if (!s) return;
+  s.className = 'step ' + (status === 'complete' ? 'complete' : status === 'running' ? 'running' : 'error');
+  m.textContent = msg || '';
+}
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+function startGenerate() {
+  const prompt = document.getElementById('prompt-input').value.trim();
+  if (!prompt) return;
+
+  document.getElementById('btn-generate').disabled = true;
+  resetSteps();
+  clearCanvas();
+  clearMetrics();
+  setBadge('running');
+
+  if (_ws) { try { _ws.close(); } catch(_) {} }
+
+  const wsUrl = 'ws://' + window.location.host + '/ws/generate';
+  _ws = new WebSocket(wsUrl);
+
+  _ws.onopen = () => _ws.send(JSON.stringify({ prompt }));
+
+  _ws.onmessage = (evt) => {
+    let msg;
+    try { msg = JSON.parse(evt.data); } catch(_) { return; }
+    handleMessage(msg);
+  };
+
+  _ws.onerror = () => {
+    setBadge('error');
+    document.getElementById('btn-generate').disabled = false;
+  };
+
+  _ws.onclose = () => {
+    document.getElementById('btn-generate').disabled = false;
+  };
+}
+
+function handleMessage(msg) {
+  if (msg.status === 'error') {
+    setBadge('error');
+    if (msg.phase >= 0) setStep(msg.phase, 'error', msg.message);
+    return;
+  }
+
+  if (msg.phase >= 0) {
+    setStep(msg.phase, msg.status, msg.message);
+    if (msg.phase === 0 && msg.netlist) updateJSONViewer(msg.netlist);
+  }
+
+  if (msg.phase === -1 && msg.status === 'result') {
+    const d = msg.data;
+    updateCanvasTitle(d.layout);
+    renderCircuit(d.layout);
+    updateMetrics(d.metrics);
+    updateDRC(d.metrics.violations);
+    setBadge('complete');
+  }
+}
+
+// ── Circuit canvas ────────────────────────────────────────────────────────────
+function svgEl(tag) { return document.createElementNS('http://www.w3.org/2000/svg', tag); }
+
+function clearCanvas() {
+  const svg = document.getElementById('circuit-svg');
+  const ph  = document.getElementById('canvas-placeholder');
+  svg.style.display = 'none';
+  ph.style.display  = 'flex';
+  svg.innerHTML = '';
+}
+
+function updateCanvasTitle(layout) {
+  const el = document.getElementById('canvas-title-text');
+  const g  = layout.grid;
+  el.textContent = `Circuit Layout  (${g.width} × ${g.height} mm grid)`;
+}
+
+function renderCircuit(layout) {
+  const svg = document.getElementById('circuit-svg');
+  const ph  = document.getElementById('canvas-placeholder');
+  const GW  = layout.grid.width;
+  const GH  = layout.grid.height;
+
+  // Transform: flip Y (grid y=0=bottom → SVG y=GH=bottom)
+  const sy = (gy) => GH - gy;           // point
+  const syComp = (gy, h) => GH - gy - h; // component top-left
+
+  svg.setAttribute('viewBox', `0 0 ${GW} ${GH}`);
+  svg.setAttribute('style', 'display:block; border:1px solid #1e1e3a; border-radius:6px;');
+  svg.innerHTML = '';
+
+  // Background
+  const bg = svgEl('rect');
+  bg.setAttribute('width', GW); bg.setAttribute('height', GH);
+  bg.setAttribute('fill', '#0f0f1a');
+  svg.appendChild(bg);
+
+  // Grid lines
+  const gg = svgEl('g');
+  gg.setAttribute('stroke', '#1e1e3a'); gg.setAttribute('stroke-width', '0.025');
+  for (let x = 0; x <= GW; x++) {
+    const l = svgEl('line');
+    l.setAttribute('x1', x); l.setAttribute('y1', 0);
+    l.setAttribute('x2', x); l.setAttribute('y2', GH);
+    gg.appendChild(l);
+  }
+  for (let y = 0; y <= GH; y++) {
+    const l = svgEl('line');
+    l.setAttribute('x1', 0); l.setAttribute('y1', y);
+    l.setAttribute('x2', GW); l.setAttribute('y2', y);
+    gg.appendChild(l);
+  }
+  svg.appendChild(gg);
+
+  // Traces (drawn before components so components appear on top)
+  const tg = svgEl('g');
+  for (const trace of layout.traces) {
+    if (trace.path.length < 2) continue;
+    const col = TRACE_COLORS[trace.net_type] || '#aaaaaa';
+    const lw  = TRACE_WIDTHS[trace.net_type] || 0.08;
+    const pts = trace.path.map(([px, py]) => `${px + 0.5},${sy(py) - 0.5}`).join(' ');
+    const poly = svgEl('polyline');
+    poly.setAttribute('points', pts);
+    poly.setAttribute('fill', 'none');
+    poly.setAttribute('stroke', col);
+    poly.setAttribute('stroke-width', lw);
+    poly.setAttribute('stroke-linecap', 'round');
+    poly.setAttribute('stroke-linejoin', 'round');
+    poly.setAttribute('opacity', '0.9');
+    tg.appendChild(poly);
+  }
+  svg.appendChild(tg);
+
+  // Components
+  for (const comp of layout.components) {
+    const col    = COMP_COLORS[comp.type] || '#888888';
+    const svgX   = comp.x + 0.05;
+    const svgY   = syComp(comp.y, comp.height) + 0.05;
+    const svgW   = comp.width  - 0.10;
+    const svgH   = comp.height - 0.10;
+    const cx     = comp.x + comp.width  / 2;
+    const cy_svg = syComp(comp.y, comp.height) + comp.height / 2;
+
+    const rect = svgEl('rect');
+    rect.setAttribute('x',      svgX); rect.setAttribute('y',      svgY);
+    rect.setAttribute('width',  svgW); rect.setAttribute('height', svgH);
+    rect.setAttribute('rx', '0.12');
+    rect.setAttribute('fill', col); rect.setAttribute('opacity', '0.85');
+    rect.setAttribute('stroke', 'white'); rect.setAttribute('stroke-width', '0.05');
+    svg.appendChild(rect);
+
+    const id_lbl = svgEl('text');
+    id_lbl.setAttribute('x', cx); id_lbl.setAttribute('y', cy_svg + 0.08);
+    id_lbl.setAttribute('text-anchor', 'middle'); id_lbl.setAttribute('dominant-baseline', 'middle');
+    id_lbl.setAttribute('font-size', '0.38'); id_lbl.setAttribute('font-weight', 'bold');
+    id_lbl.setAttribute('fill', 'white'); id_lbl.setAttribute('font-family', 'monospace');
+    id_lbl.textContent = comp.id;
+    svg.appendChild(id_lbl);
+
+    if (comp.height >= 2) {
+      const nm_lbl = svgEl('text');
+      nm_lbl.setAttribute('x', cx); nm_lbl.setAttribute('y', cy_svg + 0.60);
+      nm_lbl.setAttribute('text-anchor', 'middle'); nm_lbl.setAttribute('dominant-baseline', 'middle');
+      nm_lbl.setAttribute('font-size', '0.26'); nm_lbl.setAttribute('fill', '#ccccdd');
+      nm_lbl.setAttribute('font-family', 'monospace');
+      nm_lbl.textContent = comp.name.length > 12 ? comp.name.slice(0, 12) + '…' : comp.name;
+      svg.appendChild(nm_lbl);
+    }
+
+    for (const pin of comp.pins) {
+      const dot = svgEl('circle');
+      dot.setAttribute('cx', pin.abs_x);
+      dot.setAttribute('cy', sy(pin.abs_y));
+      dot.setAttribute('r', '0.09');
+      dot.setAttribute('fill', 'white'); dot.setAttribute('opacity', '0.75');
+      svg.appendChild(dot);
+    }
+  }
+
+  ph.style.display  = 'none';
+  svg.style.display = 'block';
+}
+
+// ── Metrics ───────────────────────────────────────────────────────────────────
+function clearMetrics() {
+  ['m-traces','m-length','m-crossings','m-completion','m-res','m-cap','m-delay'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = '—';
+  });
+  ['card-traces','card-length','card-crossings','card-completion'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.className = 'metric-card';
+  });
+  document.getElementById('drc-list').innerHTML =
+    '<div class="drc-item drc-pass"><span class="drc-icon">·</span><span>Awaiting result...</span></div>';
+}
+
+function fmt(n, decimals) { return Number(n).toFixed(decimals); }
+
+function updateMetrics(m) {
+  document.getElementById('m-traces').textContent     = m.total_traces_routed;
+  document.getElementById('m-length').innerHTML       = fmt(m.total_trace_length_mm, 1) + '<span class="metric-unit"> mm</span>';
+  document.getElementById('m-crossings').textContent  = m.wire_crossing_count;
+  document.getElementById('m-completion').innerHTML   = fmt(m.routing_completion_pct, 1) + '<span class="metric-unit"> %</span>';
+  document.getElementById('m-res').innerHTML          = fmt(m.total_resistance_ohms, 4) + '<span class="metric-unit"> Ω</span>';
+  document.getElementById('m-cap').innerHTML          = fmt(m.total_capacitance_pf, 2) + '<span class="metric-unit"> pF</span>';
+  document.getElementById('m-delay').innerHTML        = fmt(m.max_signal_delay_ps, 1) + '<span class="metric-unit"> ps</span>';
+
+  const cc = document.getElementById('card-crossings');
+  cc.className = 'metric-card ' + (m.wire_crossing_count === 0 ? 'ok' : 'warn');
+
+  const cp = document.getElementById('card-completion');
+  cp.className = 'metric-card ' + (m.routing_completion_pct >= 100 ? 'ok' : 'warn');
+}
+
+// ── DRC ───────────────────────────────────────────────────────────────────────
+function updateDRC(violations) {
+  const el = document.getElementById('drc-list');
+  el.innerHTML = '';
+
+  if (!violations || violations.length === 0) {
+    const checks = [
+      'No wire crossings', 'All nets routed',
+      'Signal lengths within limit', 'Decoupling caps in range',
+    ];
+    checks.forEach(txt => {
+      el.innerHTML += `<div class="drc-item drc-pass"><span class="drc-icon">✓</span><span>${txt}</span></div>`;
+    });
+  } else {
+    violations.forEach(v => {
+      el.innerHTML += `<div class="drc-item drc-fail"><span class="drc-icon">✗</span><span>${v}</span></div>`;
+    });
+  }
+}
+
+// ── JSON viewer ───────────────────────────────────────────────────────────────
+function updateJSONViewer(netlist) {
+  const el = document.getElementById('json-viewer');
+  el.textContent = JSON.stringify(netlist, null, 2);
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,287 @@
+{
+  "netlist": {
+    "metadata": {
+      "name": "Room_Temperature_Measurement",
+      "version": "1.0",
+      "generated_by": "GroqAPI",
+      "grid": {
+        "width": 24,
+        "height": 20,
+        "unit": "mm"
+      }
+    },
+    "components": [
+      {
+        "id": "U1",
+        "type": "IC",
+        "name": "LM35",
+        "footprint": {
+          "width": 3,
+          "height": 5
+        },
+        "x": 10,
+        "y": 8,
+        "properties": {
+          "package": "TO-92"
+        },
+        "pins": [
+          {
+            "id": "VCC",
+            "type": "POWER",
+            "net": "VCC"
+          },
+          {
+            "id": "OUT",
+            "type": "OUTPUT",
+            "net": "TEMPERATURE_OUTPUT"
+          },
+          {
+            "id": "GND",
+            "type": "POWER",
+            "net": "GND"
+          }
+        ]
+      },
+      {
+        "id": "R1",
+        "type": "RESISTOR",
+        "name": "R_PULLUP_1K",
+        "footprint": {
+          "width": 1,
+          "height": 2
+        },
+        "x": 14,
+        "y": 6,
+        "properties": {
+          "resistance_ohm": 1000,
+          "power_rating_w": 0.25
+        },
+        "pins": [
+          {
+            "id": "P1",
+            "type": "PASSIVE",
+            "net": "VCC"
+          },
+          {
+            "id": "P2",
+            "type": "PASSIVE",
+            "net": "TEMPERATURE_OUTPUT"
+          }
+        ]
+      },
+      {
+        "id": "C1",
+        "type": "CAPACITOR",
+        "name": "C_DECOUPLING",
+        "footprint": {
+          "width": 1,
+          "height": 1
+        },
+        "x": 11,
+        "y": 5,
+        "properties": {
+          "capacitance_uf": 0.1,
+          "voltage_rating_v": 10
+        },
+        "pins": [
+          {
+            "id": "P1",
+            "type": "PASSIVE",
+            "net": "VCC"
+          },
+          {
+            "id": "P2",
+            "type": "PASSIVE",
+            "net": "GND"
+          }
+        ]
+      },
+      {
+        "id": "U2",
+        "type": "IC",
+        "name": "ADC_MCP3008",
+        "footprint": {
+          "width": 4,
+          "height": 6
+        },
+        "x": 18,
+        "y": 10,
+        "properties": {
+          "package": "SOIC-16"
+        },
+        "pins": [
+          {
+            "id": "VCC",
+            "type": "POWER",
+            "net": "VCC"
+          },
+          {
+            "id": "GND",
+            "type": "POWER",
+            "net": "GND"
+          },
+          {
+            "id": "CLK",
+            "type": "INPUT",
+            "net": "CLOCK_SIGNAL"
+          },
+          {
+            "id": "DIN",
+            "type": "INPUT",
+            "net": "DATA_IN"
+          },
+          {
+            "id": "DOUT",
+            "type": "OUTPUT",
+            "net": "DATA_OUT"
+          },
+          {
+            "id": "CS",
+            "type": "INPUT",
+            "net": "CHIP_SELECT"
+          },
+          {
+            "id": "CH0",
+            "type": "INPUT",
+            "net": "TEMPERATURE_OUTPUT"
+          }
+        ]
+      },
+      {
+        "id": "C2",
+        "type": "CAPACITOR",
+        "name": "C_FILTER_100NF",
+        "footprint": {
+          "width": 1,
+          "height": 1
+        },
+        "x": 20,
+        "y": 8,
+        "properties": {
+          "capacitance_uf": 0.0001,
+          "voltage_rating_v": 10
+        },
+        "pins": [
+          {
+            "id": "P1",
+            "type": "PASSIVE",
+            "net": "TEMPERATURE_OUTPUT"
+          },
+          {
+            "id": "P2",
+            "type": "PASSIVE",
+            "net": "GND"
+          }
+        ]
+      }
+    ],
+    "nets": [
+      {
+        "id": "VCC",
+        "type": "POWER",
+        "connected_pins": [
+          {
+            "component_id": "U1",
+            "pin_id": "VCC"
+          },
+          {
+            "component_id": "R1",
+            "pin_id": "P1"
+          },
+          {
+            "component_id": "C1",
+            "pin_id": "P1"
+          },
+          {
+            "component_id": "U2",
+            "pin_id": "VCC"
+          }
+        ]
+      },
+      {
+        "id": "GND",
+        "type": "GROUND",
+        "connected_pins": [
+          {
+            "component_id": "U1",
+            "pin_id": "GND"
+          },
+          {
+            "component_id": "C1",
+            "pin_id": "P2"
+          },
+          {
+            "component_id": "U2",
+            "pin_id": "GND"
+          },
+          {
+            "component_id": "C2",
+            "pin_id": "P2"
+          }
+        ]
+      },
+      {
+        "id": "TEMPERATURE_OUTPUT",
+        "type": "SIGNAL",
+        "connected_pins": [
+          {
+            "component_id": "U1",
+            "pin_id": "OUT"
+          },
+          {
+            "component_id": "R1",
+            "pin_id": "P2"
+          },
+          {
+            "component_id": "U2",
+            "pin_id": "CH0"
+          },
+          {
+            "component_id": "C2",
+            "pin_id": "P1"
+          }
+        ]
+      },
+      {
+        "id": "CLOCK_SIGNAL",
+        "type": "SIGNAL",
+        "connected_pins": [
+          {
+            "component_id": "U2",
+            "pin_id": "CLK"
+          }
+        ]
+      },
+      {
+        "id": "DATA_IN",
+        "type": "SIGNAL",
+        "connected_pins": [
+          {
+            "component_id": "U2",
+            "pin_id": "DIN"
+          }
+        ]
+      },
+      {
+        "id": "DATA_OUT",
+        "type": "SIGNAL",
+        "connected_pins": [
+          {
+            "component_id": "U2",
+            "pin_id": "DOUT"
+          }
+        ]
+      },
+      {
+        "id": "CHIP_SELECT",
+        "type": "SIGNAL",
+        "connected_pins": [
+          {
+            "component_id": "U2",
+            "pin_id": "CS"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install *)",
+      "Bash(python phase1_eda_engine.py)",
+      "Bash(python -m pytest tests/test_phase1.py -v)",
+      "Bash(Remove-Item \"C:\\\\Users\\\\whovi\\\\Desktop\\\\eda_engine\\\\phase0_grok_translator.py\" -Force)",
+      "Bash(Write-Output \"deleted\")",
+      "Bash(python -m pytest tests/test_phase0.py -v)",
+      "Bash(python -m pytest tests/test_phase1.py -v --tb=short)",
+      "Bash(python -m pytest tests/test_phase2.py -v)",
+      "Bash(python phase2_genetic_placer.py)",
+      "Bash(python -m pytest tests/test_phase3.py -v)",
+      "Bash(python phase3_router.py)",
+      "Bash(python -c ' *)",
+      "Bash(python -m pytest tests/test_phase3.py tests/test_phase2.py tests/test_phase1.py -v)"
+    ]
+  }
+}

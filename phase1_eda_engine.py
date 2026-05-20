@@ -488,21 +488,57 @@ class InitialPlacer:
     # ------------------------------------------------------------------
 
     def _update_pin_positions(self, netlist: Netlist) -> None:
-        """Set Pin.abs_x / Pin.abs_y to the pin's position on the grid.
+        """Set Pin.abs_x / Pin.abs_y using perimeter-based pin placement.
 
-        Pins are distributed evenly along the bottom edge of their component.
-        (Phase 3 router may refine this with layer-specific offsets.)
+        Looks up each component in the component library to determine which
+        side each pin belongs to, then distributes pins evenly along that side.
+        Unrecognised pins fall back to the bottom edge.
         """
+        from component_library import lookup as lib_lookup
+
         for comp in netlist.components:
-            n = len(comp.pins)
-            for i, pin in enumerate(comp.pins):
+            comp_def = lib_lookup(comp.name, pin_count=len(comp.pins))
+            # Build name → side mapping from library (case-insensitive)
+            name_to_side: dict[str, str] = {
+                pd.name.lower(): pd.side for pd in comp_def.pin_defs
+            }
+
+            # Group pins by their assigned side
+            sides: dict[str, list] = {"left": [], "right": [], "top": [], "bottom": []}
+            for pin in comp.pins:
+                side = name_to_side.get(pin.id.lower(), "bottom")
+                sides[side].append(pin)
+
+            fw = comp.footprint.width
+            fh = comp.footprint.height
+
+            def _space(n: int, length: float) -> list[float]:
+                """Evenly spaced positions for n pins along a line of given length."""
+                if n == 0:
+                    return []
                 if n == 1:
-                    pin.abs_x = comp.x + comp.footprint.width  / 2.0
-                    pin.abs_y = comp.y
-                else:
-                    # Spread along the bottom edge
-                    pin.abs_x = comp.x + (i + 1) * comp.footprint.width / (n + 1)
-                    pin.abs_y = float(comp.y)
+                    return [length / 2.0]
+                return [length * (i + 1) / (n + 1) for i in range(n)]
+
+            # Left edge: x = comp.x, y varies along height
+            for pin, off in zip(sides["left"], _space(len(sides["left"]), fh)):
+                pin.abs_x = float(comp.x)
+                pin.abs_y = comp.y + off
+
+            # Right edge: x = comp.x + fw, y varies along height
+            for pin, off in zip(sides["right"], _space(len(sides["right"]), fh)):
+                pin.abs_x = float(comp.x + fw)
+                pin.abs_y = comp.y + off
+
+            # Top edge: y = comp.y + fh, x varies along width
+            for pin, off in zip(sides["top"], _space(len(sides["top"]), fw)):
+                pin.abs_x = comp.x + off
+                pin.abs_y = float(comp.y + fh)
+
+            # Bottom edge (default for unrecognised pins): y = comp.y
+            for pin, off in zip(sides["bottom"], _space(len(sides["bottom"]), fw)):
+                pin.abs_x = comp.x + off
+                pin.abs_y = float(comp.y)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -628,13 +664,21 @@ def visualize(graph: CircuitGraph, output_path: Path | None = None) -> Path:
             zorder=5,
         )
 
-        # Pin dots along bottom edge
-        n = len(comp.pins)
-        for i, pin in enumerate(comp.pins):
-            px = comp.x + (i + 1) * comp.footprint.width / (n + 1) if n > 1 else cx
-            py = comp.y
-            dot_col = _PIN_COLORS.get(pin.pin_type, "#ffffff")
-            ax_main.plot(px, py, "o", color=dot_col, markersize=3.5, zorder=6)
+        # Pin squares on component perimeter
+        for pin in comp.pins:
+            pin_col = _PIN_COLORS.get(pin.pin_type, "#ffffff")
+            sq = mpatches.Rectangle(
+                (pin.abs_x - 0.15, pin.abs_y - 0.15), 0.3, 0.3,
+                facecolor="white", edgecolor=pin_col, linewidth=0.8, zorder=6,
+            )
+            ax_main.add_patch(sq)
+            # Pin name label (4pt, truncated to 6 chars)
+            label = pin.id[:6]
+            ax_main.text(
+                pin.abs_x, pin.abs_y + 0.22, label,
+                color=pin_col, fontsize=3.5, ha="center", va="bottom",
+                zorder=7, alpha=0.85,
+            )
 
     # ── Legend (component types present) ──────────────────────────────
     present_types = {c.comp_type for c in graph.nodes.values()}

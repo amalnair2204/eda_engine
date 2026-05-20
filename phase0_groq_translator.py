@@ -115,6 +115,17 @@ NET TYPE RULES:
 - GROUND: GND, AGND, DGND
 - SIGNAL: everything else (data lines, drive signals, timer outputs)
 
+CRITICAL PIN RULE: List ALL physical pins for every component, including
+unconnected ones. Unconnected pins use net "NC". Use exact datasheet pin names.
+Never omit pins just because they are unused.
+Examples: MCP3008 = 16 pins (CH0..CH7, DGND, CS, DIN, DOUT, CLK, AGND, VREF, VDD),
+          ESP32-WROOM-32 = 38 pins, ATmega328P = 28 pins, NE555 = 8 pins.
+
+MANDATORY DECOUPLING CAP RULE: For EVERY MCU, IC, ADC, or op-amp in the design,
+you MUST add a 100nF decoupling capacitor automatically. Name it C_BYPASS_{comp_id}.
+Connect P1 to the component VCC/power net, P2 to GND. Place it within 2 grid
+cells of the component. This is non-negotiable -- add it even if the user did not ask.
+
 MANDATORY EEE RULES you must always follow:
 1. Every VCC/power rail must have at least one decoupling capacitor (100nF)
    placed within the design. Add it even if the user did not ask.

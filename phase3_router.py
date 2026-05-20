@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import sys
-from collections import deque
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -134,6 +134,10 @@ class RoutingGrid:
         self._height    = height
         self.grid       = np.zeros((height, width), dtype=int)
         self._pin_cells: set[tuple[int, int]] = set()
+        # Maps (x, y) -> net_id for cells that are CELL_ROUTED
+        self._cell_net: dict[tuple[int, int], str] = {}
+        # Maps (x, y) -> net_type for cells that are CELL_ROUTED
+        self._cell_net_type: dict[tuple[int, int], str] = {}
 
     # ------------------------------------------------------------------
     # Properties
@@ -185,16 +189,21 @@ class RoutingGrid:
         self,
         path: list[tuple[int, int]],
         extra_free: set[tuple[int, int]] | None = None,
+        net_id: str | None = None,
+        net_type: str | None = None,
     ) -> None:
         """Mark intermediate trace cells CELL_ROUTED and apply 1-cell DRC clearance.
 
         Skips the first and last cells (pin endpoint cells inside components).
         Never marks any cell in _pin_cells or extra_free as CELL_BLOCKED so
         that subsequent chain segments can still reach their start pins.
+        Does not mark already-ROUTED cells as BLOCKED (preserves earlier traces).
 
         Args:
             path:       Full path from source to target (LeeRouter output).
             extra_free: Additional cells never to block (current net's pin cells).
+            net_id:     Net identifier for cell ownership tracking.
+            net_type:   POWER | SIGNAL | GROUND for cell type tracking.
         """
         if len(path) <= 2:
             return
@@ -204,6 +213,10 @@ class RoutingGrid:
         for x, y in path[1:-1]:
             if self.grid[y, x] != CELL_COMPONENT:
                 self.grid[y, x] = CELL_ROUTED
+                if net_id is not None:
+                    self._cell_net[(x, y)] = net_id
+                if net_type is not None:
+                    self._cell_net_type[(x, y)] = net_type
 
             for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
                 nx, ny = x + dx, y + dy
@@ -213,6 +226,41 @@ class RoutingGrid:
                     and (nx, ny) not in never_block
                 ):
                     self.grid[ny, nx] = CELL_BLOCKED
+
+    def unmark_trace(self, path: list[tuple[int, int]]) -> None:
+        """Restore intermediate path cells from CELL_ROUTED back to CELL_FREE.
+
+        Also clears adjacent BLOCKED (DRC clearance) cells so that rerouting
+        can find alternative paths through the freed area.
+
+        Args:
+            path: The path of the trace to remove (from RoutedTrace.path).
+        """
+        freed: set[tuple[int, int]] = set()
+        for x, y in path[1:-1]:
+            if self.grid[y, x] == CELL_ROUTED:
+                self.grid[y, x] = CELL_FREE
+                self._cell_net.pop((x, y), None)
+                self._cell_net_type.pop((x, y), None)
+                freed.add((x, y))
+        # Clear adjacent BLOCKED cells that were DRC clearance for this trace.
+        # We clear any BLOCKED cell adjacent to a freed cell that is not also
+        # adjacent to a still-ROUTED cell (to avoid releasing clearance of other traces).
+        for x, y in freed:
+            for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                nx, ny = x + dx, y + dy
+                if not self.in_bounds(nx, ny):
+                    continue
+                if self.grid[ny, nx] != CELL_BLOCKED:
+                    continue
+                # Only clear if no adjacent ROUTED cell remains
+                still_needed = any(
+                    self.in_bounds(nx + ddx, ny + ddy)
+                    and self.grid[ny + ddy, nx + ddx] == CELL_ROUTED
+                    for ddx, ddy in ((-1, 0), (1, 0), (0, -1), (0, 1))
+                )
+                if not still_needed:
+                    self.grid[ny, nx] = CELL_FREE
 
     # ------------------------------------------------------------------
     # Predicates
@@ -258,7 +306,9 @@ class RoutingGrid:
         """
         c = RoutingGrid(self._width, self._height)
         c.grid = self.grid.copy()
-        c._pin_cells = set(self._pin_cells)
+        c._pin_cells      = set(self._pin_cells)
+        c._cell_net       = dict(self._cell_net)
+        c._cell_net_type  = dict(self._cell_net_type)
         return c
 
     def component_cell_count(self) -> int:
@@ -609,7 +659,12 @@ class NetRouter:
                         length=len(path),
                     )
                     routed_traces.append(trace)
-                    self._grid.mark_trace(path, extra_free=net_pin_cells)
+                    self._grid.mark_trace(
+                        path,
+                        extra_free=net_pin_cells,
+                        net_id=net.id,
+                        net_type=net.net_type,
+                    )
                     print(
                         f"   [{net_idx}/{n_nets}] {net.id:<12} : "
                         f"{comp_a}/{pin_a} --> {comp_b}/{pin_b}  "
@@ -623,7 +678,235 @@ class NetRouter:
                         f"{comp_a}/{pin_a} --> {comp_b}/{pin_b}  [FAIL]"
                     )
 
+        # Post-routing: attempt rip-up-and-reroute for failed nets
+        if failed_routes:
+            routed_traces, failed_routes = self._rip_up_and_reroute_failed(
+                failed_routes, routed_traces
+            )
+
+        # Post-routing: eliminate crossings
+        routed_traces = self._eliminate_crossings(routed_traces)
+
         return routed_traces, failed_routes
+
+    # ------------------------------------------------------------------
+    # Rip-up-and-reroute
+    # ------------------------------------------------------------------
+
+    def _rip_up_and_reroute_failed(
+        self,
+        failed_routes: list[str],
+        routed_traces: list[RoutedTrace],
+    ) -> tuple[list[RoutedTrace], list[str]]:
+        """Try to recover unrouted nets by ripping up blocking lower-priority traces.
+
+        Runs up to 3 full passes.  In each pass every failed route attempts:
+        1. Relax grid (no BLOCKED cells) to find an ideal path.
+        2. Identify which SIGNAL/GROUND ROUTED cells the ideal path needs.
+        3. Rip those blocking traces.
+        4. Route the failed net.
+        5. Re-route the ripped traces.
+
+        Args:
+            failed_routes: Failure strings from route_all().
+            routed_traces: Successfully routed traces so far.
+
+        Returns:
+            Updated (routed_traces, still_failed) after recovery attempts.
+        """
+        MAX_PASSES = 3
+        still_failed = list(failed_routes)
+
+        for pass_n in range(1, MAX_PASSES + 1):
+            if not still_failed:
+                break
+            print(f"\n[Rip-up pass {pass_n}/{MAX_PASSES}] Attempting to recover "
+                  f"{len(still_failed)} unrouted net(s)...")
+            next_failed: list[str] = []
+
+            for fail_str in still_failed:
+                # Parse: "net_id: comp_a/pin_a -> comp_b/pin_b"
+                try:
+                    net_id_part, route_part = fail_str.split(": ", 1)
+                    src_str, tgt_str = route_part.split(" -> ", 1)
+                    comp_a, pin_a = src_str.split("/", 1)
+                    comp_b, pin_b = tgt_str.split("/", 1)
+                except ValueError:
+                    next_failed.append(fail_str)
+                    continue
+
+                net_id = net_id_part.strip()
+                net_type = "SIGNAL"
+                for edge in self._graph.edges:
+                    if edge.net_id == net_id:
+                        net_type = edge.net_type
+                        break
+
+                sx, sy = self._get_pin_cell(comp_a, pin_a)
+                tx, ty = self._get_pin_cell(comp_b, pin_b)
+
+                # Find ideal path ignoring all obstacles
+                free_grid = self._grid.clone()
+                free_grid.grid[free_grid.grid == CELL_BLOCKED] = CELL_FREE
+                free_grid.grid[free_grid.grid == CELL_ROUTED]  = CELL_FREE
+                ideal_path = LeeRouter(free_grid).route(sx, sy, tx, ty)
+                if ideal_path is None:
+                    print(f"  [FAIL] {net_id}: no path exists even on empty grid")
+                    next_failed.append(fail_str)
+                    continue
+
+                # Find which ROUTED cells block the ideal path, and their traces
+                blocking_traces: list[RoutedTrace] = []
+                for cell in ideal_path[1:-1]:
+                    cx, cy = cell
+                    if self._grid.grid[cy, cx] not in (CELL_ROUTED, CELL_BLOCKED):
+                        continue
+                    for t in routed_traces:
+                        if t.net_type == "POWER":
+                            continue  # never rip power traces
+                        if any(c == cell for c in t.path[1:-1]) and t not in blocking_traces:
+                            blocking_traces.append(t)
+                            break
+
+                # Rip up blocking SIGNAL/GROUND traces
+                ripped: list[RoutedTrace] = []
+                for bt in blocking_traces:
+                    self._grid.unmark_trace(bt.path)
+                    routed_traces = [rt for rt in routed_traces if rt is not bt]
+                    ripped.append(bt)
+
+                # Route the failed net
+                path = LeeRouter(self._grid).route_with_detour(sx, sy, tx, ty)
+                if path is not None:
+                    net_pin_cells = {self._get_pin_cell(comp_a, pin_a),
+                                     self._get_pin_cell(comp_b, pin_b)}
+                    trace = RoutedTrace(
+                        net_id=net_id, net_type=net_type,
+                        source_comp=comp_a, source_pin=pin_a,
+                        target_comp=comp_b, target_pin=pin_b,
+                        path=path, length=len(path),
+                    )
+                    self._grid.mark_trace(path, extra_free=net_pin_cells,
+                                         net_id=net_id, net_type=net_type)
+                    routed_traces.append(trace)
+                    ripped_names = ", ".join(r.net_id for r in ripped)
+                    print(f"  [OK] Recovered: {net_id}"
+                          + (f" via rip-up of {ripped_names}" if ripped_names else ""))
+                else:
+                    # Failed even after rip-up — restore ripped traces
+                    next_failed.append(fail_str)
+                    print(f"  [FAIL] {net_id}: still unroutable after rip-up")
+
+                # Re-route any ripped traces regardless of success
+                for rt in ripped:
+                    rsx, rsy = self._get_pin_cell(rt.source_comp, rt.source_pin)
+                    rtx, rty = self._get_pin_cell(rt.target_comp, rt.target_pin)
+                    repath = LeeRouter(self._grid).route_with_detour(rsx, rsy, rtx, rty)
+                    if repath is not None:
+                        re_trace = RoutedTrace(
+                            net_id=rt.net_id, net_type=rt.net_type,
+                            source_comp=rt.source_comp, source_pin=rt.source_pin,
+                            target_comp=rt.target_comp, target_pin=rt.target_pin,
+                            path=repath, length=len(repath),
+                        )
+                        self._grid.mark_trace(repath, net_id=rt.net_id, net_type=rt.net_type)
+                        routed_traces.append(re_trace)
+                    else:
+                        re_fail = (f"{rt.net_id}: {rt.source_comp}/{rt.source_pin} "
+                                   f"-> {rt.target_comp}/{rt.target_pin}")
+                        next_failed.append(re_fail)
+                        print(f"  [WARN] Could not re-route ripped: {rt.net_id}")
+
+            still_failed = next_failed
+
+        return routed_traces, still_failed
+
+    # ------------------------------------------------------------------
+    # Crossing elimination
+    # ------------------------------------------------------------------
+
+    def _eliminate_crossings(
+        self, traces: list[RoutedTrace]
+    ) -> list[RoutedTrace]:
+        """Detect and eliminate wire crossings by ripping/rerouting SIGNAL nets.
+
+        A crossing occurs when two traces from different nets share a grid cell.
+        POWER and GROUND traces are never ripped.
+
+        Args:
+            traces: Full list of routed traces after initial routing.
+
+        Returns:
+            Updated trace list with crossings reduced or eliminated.
+        """
+        MAX_PASSES = 5
+
+        for pass_n in range(1, MAX_PASSES + 1):
+            # Exact crossing detection: cell -> set of net_ids
+            cell_nets: dict[tuple, set[str]] = defaultdict(set)
+            for t in traces:
+                for cell in t.path[1:-1]:
+                    cell_nets[cell].add(t.net_id)
+
+            crossing_cells = {cell for cell, nets in cell_nets.items() if len(nets) > 1}
+            before_count = len(crossing_cells)
+            if before_count == 0:
+                break
+
+            # Collect ONE SIGNAL trace involved in a crossing (rip one at a time)
+            rip_target: RoutedTrace | None = None
+            for cell in crossing_cells:
+                for t in traces:
+                    if t.net_type == "SIGNAL" and t.net_id in cell_nets[cell]:
+                        rip_target = t
+                        break
+                if rip_target is not None:
+                    break
+
+            if rip_target is None:
+                # Only POWER/GROUND crossings remain — cannot fix without ripping power
+                break
+
+            # Rip and reroute this one signal trace
+            self._grid.unmark_trace(rip_target.path)
+            traces = [t for t in traces if t is not rip_target]
+
+            sx, sy = self._get_pin_cell(rip_target.source_comp, rip_target.source_pin)
+            tx_c, ty_c = self._get_pin_cell(rip_target.target_comp, rip_target.target_pin)
+
+            # Level 1: strict (no ROUTED cells)
+            path = LeeRouter(self._grid).route(sx, sy, tx_c, ty_c)
+            if path is None:
+                # Level 2: allow BLOCKED clearance zones
+                relaxed = self._grid.clone()
+                relaxed.grid[relaxed.grid == CELL_BLOCKED] = CELL_FREE
+                path = LeeRouter(relaxed).route(sx, sy, tx_c, ty_c)
+
+            if path is not None:
+                net_pin_cells = {(sx, sy), (tx_c, ty_c)}
+                re_trace = RoutedTrace(
+                    net_id=rip_target.net_id, net_type=rip_target.net_type,
+                    source_comp=rip_target.source_comp, source_pin=rip_target.source_pin,
+                    target_comp=rip_target.target_comp, target_pin=rip_target.target_pin,
+                    path=path, length=len(path),
+                )
+                self._grid.mark_trace(path, extra_free=net_pin_cells,
+                                     net_id=rip_target.net_id, net_type=rip_target.net_type)
+                traces.append(re_trace)
+            # If truly no crossing-free path exists, leave net unrouted
+
+            # Count crossings after this pass
+            cell_nets_after: dict[tuple, set[str]] = defaultdict(set)
+            for t in traces:
+                for cell in t.path[1:-1]:
+                    cell_nets_after[cell].add(t.net_id)
+            after_count = sum(1 for nets in cell_nets_after.values() if len(nets) > 1)
+            print(f"[Crossing fix pass {pass_n}] Crossings: {before_count} -> {after_count}")
+
+            if after_count == 0:
+                break
+
+        return traces
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -817,6 +1100,28 @@ def visualize_routing(
 # Section 7 — Pipeline function
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _run_routing_attempt(
+    graph: CircuitGraph,
+    gw: int,
+    gh: int,
+) -> tuple[list[RoutedTrace], list[str], RoutingGrid]:
+    """One complete routing attempt on a grid of given dimensions.
+
+    Args:
+        graph: CircuitGraph with GA-optimised component positions.
+        gw:    Grid width for this attempt.
+        gh:    Grid height for this attempt.
+
+    Returns:
+        (routed_traces, failed_routes, routing_grid)
+    """
+    r_grid = RoutingGrid(gw, gh)
+    r_grid.initialize_from_graph(graph)
+    net_router = NetRouter(graph, r_grid)
+    routed_traces, failed_routes = net_router.route_all()
+    return routed_traces, failed_routes, r_grid
+
+
 def run_phase3(
     graph: CircuitGraph,
 ) -> tuple[CircuitGraph, list[RoutedTrace], dict]:
@@ -825,20 +1130,21 @@ def run_phase3(
     Steps:
       1. Initialise RoutingGrid (mark component obstacles).
       2. Prioritise nets (POWER -> GROUND -> SIGNAL).
-      3. Run Lee's Algorithm for each net (chain routing).
-      4. Compute and return routing metrics.
+      3. Run Lee's Algorithm + rip-up-and-reroute + crossing elimination.
+      4. If still unrouted, expand grid by +4 each dimension and retry (max 2×).
+      5. Compute and return routing metrics.
 
     Args:
         graph: Phase 2 CircuitGraph with GA-optimised component positions.
 
     Returns:
         Tuple of:
-          - graph          : Same CircuitGraph (unmodified; passed through).
+          - graph          : Same CircuitGraph (passed through; metadata may be
+                             updated if grid was auto-expanded).
           - routed_traces  : List of RoutedTrace objects.
           - metrics        : Dict with keys total_routed, total_failed,
                              total_length, crossing_count, longest_trace,
                              shortest_trace, failed_routes.
-                             This dict is the exact input Phase 4 expects.
     """
     gw, gh = graph.metadata.width, graph.metadata.height
 
@@ -857,17 +1163,31 @@ def run_phase3(
     print("\n[Phase 3] Step 3/4  Running Lee's Algorithm maze router ...")
     routed_traces, failed_routes = net_router.route_all()
 
+    # Grid expansion fallback (up to 2 attempts)
+    MAX_EXPANSIONS = 2
+    expansion = 0
+    while failed_routes and expansion < MAX_EXPANSIONS:
+        expansion += 1
+        gw += 4
+        gh += 4
+        print(f"\n[Phase 3] Grid expansion #{expansion}: retrying at {gw}x{gh} ...")
+        # Update graph metadata to reflect new grid size
+        graph.metadata.width  = gw
+        graph.metadata.height = gh
+        routed_traces, failed_routes, r_grid = _run_routing_attempt(graph, gw, gh)
+        if failed_routes:
+            print(f"   Still {len(failed_routes)} unrouted after expansion")
+        else:
+            print(f"   All nets routed after expansion to {gw}x{gh}")
+
     print("\n[Phase 3] Step 4/4  Computing routing metrics ...")
 
-    # Crossing count: cells shared by traces of DIFFERENT nets
-    cell_net: dict[tuple[int, int], str] = {}
-    crossing_count = 0
+    # Crossing count: cells occupied by 2+ DIFFERENT net_ids (exact set-based)
+    cell_nets_final: dict[tuple[int, int], set[str]] = defaultdict(set)
     for trace in routed_traces:
         for cell in trace.path[1:-1]:  # skip pin endpoint cells
-            if cell in cell_net and cell_net[cell] != trace.net_id:
-                crossing_count += 1
-            else:
-                cell_net[cell] = trace.net_id
+            cell_nets_final[cell].add(trace.net_id)
+    crossing_count = sum(1 for nets in cell_nets_final.values() if len(nets) > 1)
 
     lengths = [t.length for t in routed_traces]
     metrics: dict = {

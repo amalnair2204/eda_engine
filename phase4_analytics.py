@@ -290,12 +290,12 @@ class AnalyticsEngine:
                 f"board is not complete"
             )
 
-        # 5. Power trace too thin (short trace serving 3+ components)
+        # 5. Power trace too thin (short trace serving 5+ components)
         power_traces = [t for t in traces if t.net_type == "POWER"]
         for t in power_traces:
             nid = t.net_id
             n_comps = len(self._net_comps.get(nid, set()))
-            if t.length < 5 and n_comps >= 3:
+            if t.length < 5 and n_comps >= 5:
                 violations.append(
                     f"POWER WARNING: Net {nid} may need wider trace "
                     f"for current capacity"

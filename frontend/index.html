@@ -139,10 +139,18 @@ textarea::placeholder { color: var(--dim); }
 
 /* ── DRC panel ────────────────────────────────────────────────────────────── */
 .drc-list { display: flex; flex-direction: column; gap: 5px; }
-.drc-item { font-size: 11px; display: flex; align-items: flex-start; gap: 6px; line-height: 1.45; }
+.drc-item { font-size: 11px; display: flex; align-items: flex-start; gap: 6px; line-height: 1.45; cursor: default; }
 .drc-pass { color: var(--emerald); }
 .drc-fail { color: var(--red); }
+.drc-warn { color: var(--amber); }
 .drc-icon { flex-shrink: 0; margin-top: 1px; font-size: 12px; }
+.drc-summary {
+  font-size: 11px; font-weight: 700; padding: 5px 8px; border-radius: 5px;
+  margin-bottom: 6px; text-align: center;
+}
+.drc-summary.all-pass { background: #001a0e; color: var(--emerald); }
+.drc-summary.has-fail { background: #200000; color: var(--red); }
+.drc-item[title]:hover { opacity: 0.8; }
 
 /* ── JSON viewer ──────────────────────────────────────────────────────────── */
 .json-viewer {
@@ -543,12 +551,28 @@ function renderCircuit(layout) {
     }
 
     for (const pin of comp.pins) {
-      const dot = svgEl('circle');
-      dot.setAttribute('cx', pin.abs_x);
-      dot.setAttribute('cy', sy(pin.abs_y));
-      dot.setAttribute('r', '0.09');
-      dot.setAttribute('fill', 'white'); dot.setAttribute('opacity', '0.75');
-      svg.appendChild(dot);
+      // Color by net type
+      const netColor = pin.net === 'NC' ? '#333355'
+                     : pin.net_type === 'POWER'  ? '#FFD700'
+                     : pin.net_type === 'GROUND' ? '#888888'
+                     : pin.net_type === 'SIGNAL' ? '#00C97A'
+                     : '#aaaaaa';
+      const halfSz = 0.065;
+      const sq = svgEl('rect');
+      sq.setAttribute('x', pin.abs_x - halfSz);
+      sq.setAttribute('y', sy(pin.abs_y) - halfSz);
+      sq.setAttribute('width',  halfSz * 2);
+      sq.setAttribute('height', halfSz * 2);
+      sq.setAttribute('fill', 'white');
+      sq.setAttribute('stroke', netColor);
+      sq.setAttribute('stroke-width', '0.025');
+      sq.setAttribute('opacity', '0.85');
+      sq.setAttribute('rx', '0.01');
+      // Tooltip: pin name + net
+      const tooltip = svgEl('title');
+      tooltip.textContent = `${pin.id} → ${pin.net}`;
+      sq.appendChild(tooltip);
+      svg.appendChild(sq);
     }
   }
 
@@ -589,23 +613,76 @@ function updateMetrics(m) {
 }
 
 // ── DRC ───────────────────────────────────────────────────────────────────────
+const DRC_TOOLTIPS = {
+  'DRC FAIL':     'Design Rule Check failure — must be fixed before manufacture',
+  'EEE WARNING':  'EEE rule advisory — check signal integrity or component placement',
+  'POWER WARNING':'High-current nets may need wider traces to avoid overheating',
+  'SIGNAL WARNING':'Long trace may cause signal integrity issues at high frequency',
+};
+const RULE_CHECKS = [
+  { key: 'crossing',   label: 'No wire crossings',        tip: 'Two traces share a cell — physical short circuit' },
+  { key: 'unrouted',   label: 'All nets routed',           tip: 'This connection has no physical trace — board incomplete' },
+  { key: 'decoupling', label: 'Decoupling caps in range',  tip: 'IC needs a 100nF cap within 3 cells of its power pin' },
+  { key: 'signal',     label: 'Signal lengths OK',         tip: 'Long traces can cause signal integrity issues' },
+  { key: 'power',      label: 'Power trace widths OK',     tip: 'High-current nets need wider traces to avoid overheating' },
+];
+
+function _ruleKey(v) {
+  const vl = v.toLowerCase();
+  if (vl.includes('crossing')) return 'crossing';
+  if (vl.includes('unrouted') || vl.includes('unroute')) return 'unrouted';
+  if (vl.includes('decoupling') || vl.includes('decoup')) return 'decoupling';
+  if (vl.includes('signal warning')) return 'signal';
+  if (vl.includes('power warning') || vl.includes('wider trace')) return 'power';
+  return 'other';
+}
+
 function updateDRC(violations) {
   const el = document.getElementById('drc-list');
   el.innerHTML = '';
 
-  if (!violations || violations.length === 0) {
-    const checks = [
-      'No wire crossings', 'All nets routed',
-      'Signal lengths within limit', 'Decoupling caps in range',
-    ];
-    checks.forEach(txt => {
-      el.innerHTML += `<div class="drc-item drc-pass"><span class="drc-icon">✓</span><span>${txt}</span></div>`;
-    });
-  } else {
-    violations.forEach(v => {
-      el.innerHTML += `<div class="drc-item drc-fail"><span class="drc-icon">✗</span><span>${v}</span></div>`;
-    });
+  const hasViolations = violations && violations.length > 0;
+
+  // Summary line
+  const sumEl = document.createElement('div');
+  sumEl.className = 'drc-summary ' + (hasViolations ? 'has-fail' : 'all-pass');
+  sumEl.textContent = hasViolations
+    ? `${violations.length} issue(s) found`
+    : 'All checks passed ✓';
+  el.appendChild(sumEl);
+
+  // Sort: DRC FAIL > EEE WARNING > POWER/SIGNAL WARNING
+  function _sev(v) {
+    if (v.startsWith('DRC FAIL')) return 0;
+    if (v.startsWith('EEE WARNING')) return 1;
+    return 2;
   }
+  const sorted = hasViolations ? [...violations].sort((a, b) => _sev(a) - _sev(b)) : [];
+
+  // Failing rules
+  const failedKeys = new Set(sorted.map(_ruleKey));
+
+  // Show each violation with tooltip
+  sorted.forEach(v => {
+    const key = _ruleKey(v);
+    const tip = RULE_CHECKS.find(r => r.key === key)?.tip
+              || DRC_TOOLTIPS[Object.keys(DRC_TOOLTIPS).find(k => v.startsWith(k))]
+              || '';
+    const cls = v.startsWith('DRC FAIL') ? 'drc-fail'
+              : v.startsWith('EEE WARNING') ? 'drc-warn'
+              : 'drc-warn';
+    const icon = v.startsWith('DRC FAIL') ? '✗' : '⚠';
+    el.innerHTML += `<div class="drc-item ${cls}" title="${tip.replace(/"/g,"'")}">
+      <span class="drc-icon">${icon}</span><span>${v}</span></div>`;
+  });
+
+  // Show green checkmark for each passing rule
+  RULE_CHECKS.forEach(rule => {
+    if (!failedKeys.has(rule.key)) {
+      el.innerHTML += `<div class="drc-item drc-pass" title="${rule.tip}">
+        <span class="drc-icon">✓</span><span>${rule.label}</span></div>`;
+    }
+  });
 }
 
 // ── JSON viewer ───────────────────────────────────────────────────────────────

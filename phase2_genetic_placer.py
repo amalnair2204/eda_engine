@@ -118,7 +118,8 @@ class FitnessEvaluator:
     _W_OVERLAP = 10.0
     _W_THERMAL =  2.0
     _W_EDGE    =  1.5
-    _W_DECAP   = -1.5   # negative = reward (subtracted from score)
+    _W_DECAP   = -4.0   # negative = reward (subtracted from score)
+    _DECAP_FAR_PENALTY = 150.0  # hard penalty if bypass cap > 3 cells from IC
 
     def __init__(self, graph: CircuitGraph) -> None:
         """Pre-compute net membership and reward structures from the graph.
@@ -277,17 +278,31 @@ class FitnessEvaluator:
         return penalty
 
     def _decap_reward(self, chromosome: Chromosome) -> float:
-        """20.0 per decoupling cap within 2 cells of its MCU/IC power companion."""
+        """20.0 reward per decoupling cap within 2 cells of its MCU/IC.
+
+        Also applies a hard penalty of +150 (via return value sign) when a
+        bypass cap exists but is placed more than 3 cells away from its IC.
+        The caller multiplies by _W_DECAP (-4.0), so reward→positive reduction
+        and far-penalty→positive addition are both correct in sign.
+        """
         reward = 0.0
         for cap_id, mcu_ids in self._decap_pairs:
             cap_comp = self._graph.nodes[cap_id]
             cx_cap, cy_cap = self._center(cap_comp, chromosome.positions[cap_id])
+            found_close = False
             for mcu_id in mcu_ids:
                 mcu_comp = self._graph.nodes[mcu_id]
                 cx_m, cy_m = self._center(mcu_comp, chromosome.positions[mcu_id])
-                if math.hypot(cx_cap - cx_m, cy_cap - cy_m) <= 2.0:
+                dist = math.hypot(cx_cap - cx_m, cy_cap - cy_m)
+                if dist <= 2.0:
                     reward += 20.0
-                    break  # each cap counts at most once
+                    found_close = True
+                    break
+            if not found_close:
+                # Cap exists but is too far away — penalise
+                # We subtract this from reward (reward becomes more negative),
+                # which after multiplication by _W_DECAP (-4.0) adds to fitness.
+                reward -= self._DECAP_FAR_PENALTY / abs(self._W_DECAP)
         return reward
 
 
@@ -296,24 +311,47 @@ class FitnessEvaluator:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _update_graph_pin_positions(graph: CircuitGraph) -> None:
-    """Recompute Pin.abs_x / Pin.abs_y after component positions change.
+    """Recompute Pin.abs_x / Pin.abs_y after GA moves component positions.
 
-    Mirrors Phase 1's InitialPlacer._update_pin_positions: pins are spread
-    evenly along the bottom edge of their parent component.
+    Uses perimeter-based positioning from the component library, matching
+    Phase 1's InitialPlacer._update_pin_positions behaviour.
 
     Args:
         graph: CircuitGraph whose Component.x / .y have just been updated.
     """
+    from component_library import lookup as lib_lookup
+
+    def _space(n: int, length: float) -> list[float]:
+        if n == 0:
+            return []
+        if n == 1:
+            return [length / 2.0]
+        return [length * (i + 1) / (n + 1) for i in range(n)]
+
     for comp in graph.nodes.values():
-        n  = len(comp.pins)
-        cx = comp.x + comp.footprint.width / 2.0
-        for i, pin in enumerate(comp.pins):
-            if n == 1:
-                pin.abs_x = cx
-                pin.abs_y = float(comp.y)
-            else:
-                pin.abs_x = comp.x + (i + 1) * comp.footprint.width / (n + 1)
-                pin.abs_y = float(comp.y)
+        comp_def = lib_lookup(comp.name, pin_count=len(comp.pins))
+        name_to_side: dict[str, str] = {
+            pd.name.lower(): pd.side for pd in comp_def.pin_defs
+        }
+        sides: dict[str, list] = {"left": [], "right": [], "top": [], "bottom": []}
+        for pin in comp.pins:
+            sides[name_to_side.get(pin.id.lower(), "bottom")].append(pin)
+
+        fw = comp.footprint.width
+        fh = comp.footprint.height
+
+        for pin, off in zip(sides["left"],   _space(len(sides["left"]),   fh)):
+            pin.abs_x = float(comp.x)
+            pin.abs_y = comp.y + off
+        for pin, off in zip(sides["right"],  _space(len(sides["right"]),  fh)):
+            pin.abs_x = float(comp.x + fw)
+            pin.abs_y = comp.y + off
+        for pin, off in zip(sides["top"],    _space(len(sides["top"]),    fw)):
+            pin.abs_x = comp.x + off
+            pin.abs_y = float(comp.y + fh)
+        for pin, off in zip(sides["bottom"], _space(len(sides["bottom"]), fw)):
+            pin.abs_x = comp.x + off
+            pin.abs_y = float(comp.y)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

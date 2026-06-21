@@ -23,7 +23,7 @@ import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import matplotlib
 matplotlib.use("Agg")            # headless — must come before pyplot import
@@ -370,6 +370,46 @@ def half_perimeter_wire_length(graph: CircuitGraph) -> float:
         ys = net_ys[net_id]
         total += (max(xs) - min(xs)) + (max(ys) - min(ys))
     return total
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Section 4b — Placer interface  (Strategy pattern contract)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@runtime_checkable
+class Placer(Protocol):
+    """Strategy interface shared by all swappable placement algorithms.
+
+    A Placer takes a CircuitGraph, optimises component positions, and returns
+    the SAME CircuitGraph with only Component.x / Component.y mutated (and
+    Pin.abs_x / Pin.abs_y refreshed).  Nothing else on the graph may change.
+
+    Both Phase 2 (``run_phase2``, Genetic Algorithm) and Phase 7
+    (``run_phase7`` / ``RLPlacer``, Reinforcement Learning) satisfy this
+    callable signature, so they are interchangeable at the pipeline level.
+    """
+
+    def __call__(self, graph: "CircuitGraph") -> "CircuitGraph":
+        """Place components and return the graph with positions optimised."""
+        ...
+
+
+@runtime_checkable
+class Router(Protocol):
+    """Strategy interface shared by all swappable routing algorithms.
+
+    A Router reads Component.x / Component.y (and pin positions) from a
+    CircuitGraph and returns ``(graph, traces, metrics)`` WITHOUT mutating the
+    graph's topology — only producing trace paths as separate output.
+
+    Both Phase 3 (``run_phase3``, single-layer Lee's maze router) and Phase 8
+    (``run_phase8``, multi-layer router with vias) satisfy this signature, so
+    they are interchangeable at the pipeline level.
+    """
+
+    def __call__(self, graph: "CircuitGraph") -> tuple["CircuitGraph", list, dict]:
+        """Route all nets and return (graph, traces, metrics dict)."""
+        ...
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

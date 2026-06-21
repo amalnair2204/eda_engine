@@ -1,188 +1,192 @@
-# EDA Engine — AI-Accelerated PCB Placement & Routing
+# AI-Accelerated EDA Placement & Routing Engine
 
-A pure-software, end-to-end AI-accelerated Electronic Design Automation (EDA) tool.
-Type a plain-English circuit description; the engine translates it into a validated
-netlist, optimises component placement with a Genetic Algorithm, routes copper traces
-with Lee's maze router, and reports real electrical properties — all from a web UI.
+> Turn a plain-English circuit description into an optimized, fully-routed,
+> manufacturable PCB layout — through an 11-stage AI pipeline, served as a
+> full-stack web app with a grounded design copilot.
 
----
-
-## Architecture
-
-```
-Plain English Prompt
-        │
-        ▼
-┌─────────────────────────────────┐
-│  PHASE 0 — Groq API Translator  │  English → JSON Netlist (LLaMA 3.3 70B)
-└─────────────────────────────────┘
-        │
-        ▼
-┌─────────────────────────────────┐
-│  PHASE 1 — Parser & Graph       │  JSON → CircuitGraph (NetworkX)
-└─────────────────────────────────┘
-        │
-        ▼
-┌─────────────────────────────────┐
-│  PHASE 2 — Genetic Algorithm    │  Minimise HPWL over 200 generations
-└─────────────────────────────────┘
-        │
-        ▼
-┌─────────────────────────────────┐
-│  PHASE 3 — Maze Router          │  Lee's Algorithm / BFS on 2D grid
-└─────────────────────────────────┘
-        │
-        ▼
-┌─────────────────────────────────┐
-│  PHASE 4 — Analytics Engine     │  R, C, delay, DRC rule check
-└─────────────────────────────────┘
-        │
-        ▼
-┌─────────────────────────────────┐
-│  PHASE 6 — FastAPI + Frontend   │  WebSocket streaming, SVG canvas
-└─────────────────────────────────┘
-```
+![Python](https://img.shields.io/badge/Python-3.12-blue)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688)
+![Groq](https://img.shields.io/badge/LLM-Groq%20LLaMA%203.3%2070B-orange)
+![RL](https://img.shields.io/badge/RL-PPO%20(SB3)-red)
+![Tests](https://img.shields.io/badge/tests-108%20passing-brightgreen)
+![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
 ---
+
+## Overview
+
+Describe a circuit in natural language — *"an ESP32 reading three analog sensors
+through an ADC"* — and the engine returns a placed, routed, electrically-analyzed,
+and fabrication-ready PCB. It pairs an LLM netlist generator with both classical
+and learned optimization: a genetic-algorithm placer **and** a reinforcement-learning
+placement agent, single- and multi-layer maze routing with via insertion,
+industry-standard manufacturing export, and a retrieval-augmented copilot that
+answers design questions grounded in real datasheets.
+
+This is a pure-software portfolio project — no physical hardware — built to
+demonstrate LLM orchestration, reinforcement learning, classical optimization,
+and full-stack delivery in one coherent system.
+
+## Demo
+
+<!-- Add screenshots to docs/ and uncomment:
+![UI](docs/ui.png)
+![Multi-layer routing](docs/routing.png)
+![Gerber preview](docs/gerber_preview.png)
+-->
+
+## Pipeline
+
+```
+Plain-English prompt
+  → Phase 0   Groq (LLaMA 3.3 70B)         →  JSON netlist
+  → Phase 1   Parser + CircuitGraph
+  → Phase 2/7 Placement      ┌ Genetic Algorithm  (near-optimal global search)
+                             └ RL Agent (PPO)      (fast amortized inference)
+  → Phase 3/8 Routing        ┌ Single-layer Lee's maze router
+                             └ Multi-layer + vias  (0 same-layer crossings)
+  → Phase 4   Analytics (HPWL, per-layer crossings, vias, parasitics, DRC/ERC)
+  → Phase 9   Manufacturing export (Gerber RS-274X · Excellon · BOM · KiCad)
+  → Phase 5/6 FastAPI + WebSocket web app at localhost:8000
+  → Phase 10  RAG design copilot (grounded, cited answers over datasheets)
+```
+
+Placement strategy (`ga` | `rl`) and router (`single` | `multi`) are selectable
+at runtime — they share a common Strategy interface, so each is a drop-in
+alternative.
+
+## Placement Benchmark — Learned vs Classical
+
+Measured on the sample netlist, comparing all three placers head-to-head:
+
+| Placer | HPWL | Overlaps | Time (s) | Routing completion |
+|--------|-----:|---------:|---------:|-------------------:|
+| Random | 104.5 | 0 | 0.000 | 100.0% |
+| Genetic Algorithm | **33.0** | 0 | 1.039 | 86.1% |
+| RL Agent (PPO) | 41.0 | 0 | **0.021** | 88.9% |
+
+**Takeaway:** the RL policy learns placement — **~61% lower wirelength than random**
+— and runs **~50× faster than the GA** (0.021s vs 1.04s) by trading ~24% HPWL.
+This is the core tradeoff in modern EDA: a metaheuristic does a slow, near-optimal
+per-instance search, while a learned policy pays its cost once during training and
+then places almost instantly. The GA wins on raw quality; the RL agent wins on
+amortized speed.
+
+## Key Features
+
+- **Dual placement engines** — genetic algorithm and a PPO reinforcement-learning
+  agent (masked action space, sequential placement MDP), benchmarked head-to-head.
+- **Multi-layer routing with vias** — Lee's algorithm extended to a 3D grid;
+  layer-direction biasing and via-cost minimization drive same-layer crossings to
+  zero on the sample netlist.
+- **Manufacturing export** — generates Gerber RS-274X (one file per copper layer),
+  Excellon drill files, a grouped BOM CSV, and a KiCad-importable netlist, bundled
+  fab-ready. Validated by re-parsing every generated file.
+- **RAG design copilot** — ask "suggest a lower-power alternative for U1" and get a
+  cited answer grounded in a datasheet knowledge base plus your *current* design.
+  Refuses to fabricate specs not in the knowledge base.
+- **Deterministic guardrails** — datasheet-sourced pinouts (never LLM-inferred);
+  auto-injected decoupling caps; DRC/ERC checks.
+- **Full-stack** — FastAPI + WebSocket backend, browser UI, real-time progress.
 
 ## Tech Stack
 
-| Layer        | Tool / Library       | Purpose                              |
-|--------------|----------------------|--------------------------------------|
-| LLM          | Groq SDK + LLaMA 3.3 | Prompt → JSON netlist                |
-| Graph        | Built-in + NetworkX  | CircuitGraph adjacency model         |
-| Optimisation | NumPy                | GA fitness (HPWL) calculations       |
-| Routing      | Pure Python          | BFS maze router on 2D int grid       |
-| Visualisation| Matplotlib           | Phase PNG outputs (dark-mode canvas) |
-| Backend      | FastAPI + Uvicorn    | REST + WebSocket API                 |
-| Frontend     | Vanilla HTML/CSS/JS  | SVG circuit renderer, live metrics   |
-| Env vars     | python-dotenv        | API key management                   |
-| Testing      | Pytest               | 52 tests across all phases           |
+| Layer | Tools |
+|-------|-------|
+| LLM | Groq API (LLaMA 3.3 70B) |
+| Reinforcement learning | PyTorch, Gymnasium, Stable-Baselines3, sb3-contrib (MaskablePPO) |
+| Optimization & graph | NumPy, NetworkX |
+| Routing | Custom Lee's / A* on a 2D/3D integer grid |
+| Manufacturing | gerbonara (Gerber / Excellon / render) |
+| RAG | sentence-transformers (embeddings), ChromaDB (vector store), pypdf |
+| API / UI | FastAPI, Uvicorn, WebSockets, HTML/CSS/JS |
+| Viz & tests | Matplotlib, Pytest (108 tests) |
 
----
-
-## Setup
+## Getting Started
 
 ```bash
-# 1. Clone
-git clone <repo-url>
+# Clone
+git clone https://github.com/amalnair2204/eda_engine.git
 cd eda_engine
 
-# 2. Create virtual environment (recommended)
-python -m venv .venv
-source .venv/bin/activate       # Linux / macOS
-.venv\Scripts\activate          # Windows
-
-# 3. Install dependencies
+# Environment
+python -m venv venv
+venv\Scripts\activate              # Windows
+# source venv/bin/activate         # macOS / Linux
 pip install -r requirements.txt
 
-# 4. Configure API key
-cp .env.example .env
-# Edit .env and add your Groq API key:
-#   GROQ_API_KEY=gsk_...
+# Configure — copy the template and add your Groq key
+copy .env.example .env             # Windows  (cp on macOS/Linux)
+# then edit .env and set GROQ_API_KEY
+
+# Build the copilot's knowledge base (one time)
+python ingest_knowledge.py
+
+# Run
+python -m uvicorn app:app --reload
+# open http://localhost:8000
 ```
 
-Get a free Groq API key at [console.groq.com](https://console.groq.com).
+> `.env` holds a live Groq key and is gitignored. The Chroma vector store is a
+> runtime artifact rebuilt by `ingest_knowledge.py`, so it is not committed either.
 
----
+## Usage
 
-## Run
+1. Open `localhost:8000`.
+2. Enter a circuit description in plain English.
+3. Pick a placement strategy (**GA** or **RL Agent**) and a router (**single** or
+   **multi-layer**).
+4. Watch the pipeline stream phase-by-phase progress over WebSocket.
+5. Inspect the routed layout and the analytics report (electrical metrics +
+   DRC/ERC).
+6. Download fabrication files (Gerber / drill / BOM / KiCad) from the export button.
+7. Ask the design copilot questions about your board — it answers with citations.
 
+### Benchmarks & training
 ```bash
-uvicorn app:app --reload
+python -m benchmark_placement     # random vs GA vs RL  → outputs/
+python -m benchmark_routing       # single vs multi-layer → outputs/
+python -m train_phase7_rl         # retrain the RL policy → models/
+python -m pytest tests/ -v        # full test suite
 ```
 
-Open [http://localhost:8000](http://localhost:8000) in your browser.
+## Project Structure
 
----
-
-## How to use
-
-1. Type a plain-English circuit description in the **Circuit Prompt** box.
-   Example: *"Connect an ESP32 to a status LED via a 330 ohm resistor"*
-2. Click **Generate Circuit**.
-3. Watch the 5-step pipeline progress in real time.
-4. The SVG canvas renders the routed PCB layout when complete.
-5. Metrics cards show resistance, capacitance, delay, and crossings.
-6. The DRC panel lists any EEE rule violations.
-
----
-
-## Running individual phases
-
-```bash
-# Phase 0 — Groq API translation
-python phase0_groq_translator.py --prompt "Connect an ESP32 to an LED via a resistor"
-
-# Phase 1 — Parse + graph (uses sample_netlist.json)
-python phase1_eda_engine.py
-
-# Phase 2 — GA placement optimizer
-python phase2_genetic_placer.py
-
-# Phase 3 — Maze router
-python phase3_router.py
-
-# Phase 4 — Analytics engine
-python phase4_analytics.py
-
-# All tests
-pytest tests/ -v
+```
+eda_engine/
+├── phase0_groq_translator.py     # LLM → JSON netlist
+├── phase1_eda_engine.py          # Parser, CircuitGraph, core models + Strategy protocols
+├── phase2_genetic_placer.py      # GA placement
+├── phase3_router.py              # Single-layer maze router
+├── phase4_analytics.py           # EEE metrics + DRC/ERC (per-layer)
+├── phase7_rl_placer.py           # RL placement agent (PPO) + Gymnasium env
+├── phase8_multilayer_router.py   # Multi-layer routing + vias
+├── phase9_export.py              # Gerber / Excellon / BOM / KiCad export
+├── phase10_rag_copilot.py        # Grounded RAG copilot
+├── train_phase7_rl.py            # RL training entrypoint
+├── ingest_knowledge.py           # Build the copilot's vector store
+├── benchmark_placement.py        # GA vs RL vs random
+├── benchmark_routing.py          # single vs multi-layer
+├── app.py                        # FastAPI backend + WebSocket
+├── frontend/                     # Web UI
+├── knowledge/                    # Datasheet / design-rule corpus (RAG source)
+├── models/                       # Trained RL policy
+├── tests/                        # 108 pytest tests
+├── CLAUDE.md                     # Architecture + conventions (single source of truth)
+└── requirements.txt
 ```
 
----
+## What This Demonstrates
 
-## Phase descriptions
+- Combining an LLM with both classical (GA, maze routing) and learned (RL) methods
+  in one production pipeline — and honestly benchmarking them against each other.
+- Formulating PCB placement as a sequential-decision RL problem with a masked
+  action space, in the spirit of RL chip-floorplanning research.
+- Designing around LLM failure modes (hallucinated pins, fabricated specs) with
+  deterministic guardrails and a grounded, cited RAG layer.
+- End-to-end delivery: algorithm core → FastAPI service → real-time web UI →
+  manufacturable output.
 
-**Phase 0 — LLM Translation**
-The Groq API (LLaMA 3.3 70B) converts a plain-English circuit description into
-a validated JSON netlist.  A structured system prompt and two few-shot examples
-enforce the schema; the output is validated before passing downstream.
+## License
 
-**Phase 1 — Parser & Graph Builder**
-Parses the JSON netlist into typed Python dataclasses (`Component`, `Pin`, `Net`).
-Builds a `CircuitGraph` via star-expansion per net.  `InitialPlacer` assigns
-non-overlapping seed positions respecting EEE edge-clearance rules.
-
-**Phase 2 — Genetic Algorithm Placer**
-Evolves 50 candidate layouts over 200 generations, minimising a weighted fitness
-function: HPWL × 1.0, overlap penalty × 10.0, thermal penalty × 2.0, edge
-proximity × 1.5, and a decoupling-cap proximity reward × −1.5.  Typical
-HPWL improvement: 40–60%.
-
-**Phase 3 — Maze Router**
-Routes copper trace paths using Lee's Algorithm (BFS wavefront expansion +
-backtrace).  Nets are prioritised POWER → GROUND → SIGNAL.  A three-level
-detour strategy (normal → DRC-relaxed → full crossing) ensures connectivity
-even in dense layouts.
-
-**Phase 4 — Analytics Engine**
-Computes per-trace DC resistance, parasitic capacitance (parallel-plate
-microstrip model), and signal propagation delay (FR4 time-of-flight).  Runs
-five EEE design-rule checks: wire crossings, trace length, decoupling cap
-proximity, unrouted nets, and power trace width.
-
-**Phase 6 — FastAPI Integration**
-FastAPI serves the frontend SPA and exposes `POST /generate` (synchronous)
-and `WebSocket /ws/generate` (streaming, per-phase progress messages).
-The SVG canvas in the browser renders components, traces, and pins from
-the `layout` JSON returned by the backend.
-
----
-
-## Sample output
-
-![Phase 3 Routed Layout](outputs/phase3_output.png)
-
----
-
-## Environment variables
-
-| Variable        | Default                    | Description           |
-|-----------------|----------------------------|-----------------------|
-| `GROQ_API_KEY`  | *(required)*               | Groq API key          |
-| `GROQ_MODEL`    | `llama-3.3-70b-versatile`  | Groq model to use     |
-| `GRID_WIDTH`    | `24`                       | Board grid columns    |
-| `GRID_HEIGHT`   | `20`                       | Board grid rows       |
-| `GA_GENERATIONS`| `200`                      | GA evolution cycles   |
-| `GA_POPULATION` | `50`                       | GA population size    |
+MIT

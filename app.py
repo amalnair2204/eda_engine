@@ -46,14 +46,75 @@ _FRONTEND_DIR = _PROJECT_ROOT / "frontend"
 # Single worker prevents concurrent matplotlib / NumPy calls
 _executor = ThreadPoolExecutor(max_workers=1)
 
+# Most-recent routed board, cached for the manufacturing export endpoint.
+# Populated at the end of the routing step in both /generate and /ws/generate.
+_LAST_ROUTED: dict = {}
+
 
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
 
+class CopilotRequest(BaseModel):
+    """Request body for POST /copilot."""
+    query: str
+    history: list = []
+
+
 class GenerateRequest(BaseModel):
     """Request body for POST /generate."""
     prompt: str
+    placer: str = "ga"   # "ga" (default, Genetic Algorithm) | "rl" (Phase 7 RL)
+    router: str = "single"  # "single" (default, Phase 3) | "multi" (Phase 8)
+
+
+# Valid placement strategies, mapping the request value to a human label.
+_VALID_PLACERS = {"ga": "Genetic Algorithm", "rl": "RL agent"}
+
+# Valid routing strategies, mapping the request value to a human label.
+_VALID_ROUTERS = {"single": "single-layer router", "multi": "multi-layer router"}
+
+
+def _resolve_router(name: str):
+    """Return the Router strategy function for a request value.
+
+    Args:
+        name: "single" or "multi".
+
+    Returns:
+        Callable(CircuitGraph) -> (graph, traces, metrics) — run_phase3 or run_phase8.
+
+    Raises:
+        ValueError: If name is not a recognised router.
+    """
+    if name == "single":
+        from phase3_router import run_phase3
+        return run_phase3
+    if name == "multi":
+        from phase8_multilayer_router import run_phase8
+        return run_phase8
+    raise ValueError(f"Unknown router '{name}'. Use 'single' or 'multi'.")
+
+
+def _resolve_placer(name: str):
+    """Return the Placer strategy function for a request value.
+
+    Args:
+        name: "ga" or "rl".
+
+    Returns:
+        Callable(CircuitGraph) -> CircuitGraph (run_phase2 or run_phase7).
+
+    Raises:
+        ValueError: If name is not a recognised placer.
+    """
+    if name == "ga":
+        from phase2_genetic_placer import run_phase2
+        return run_phase2
+    if name == "rl":
+        from phase7_rl_placer import run_phase7
+        return run_phase7
+    raise ValueError(f"Unknown placer '{name}'. Use 'ga' or 'rl'.")
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +185,8 @@ def _board_to_metrics(board) -> dict:
         "total_capacitance_pf":  board.total_capacitance_pf,
         "max_signal_delay_ps":   board.max_signal_delay_ps,
         "violations":            board.violations,
+        "via_count":             getattr(board, "via_count", 0),
+        "per_layer_crossings":   getattr(board, "per_layer_crossings", {}),
     }
 
 
@@ -131,13 +194,20 @@ def _board_to_metrics(board) -> dict:
 # Synchronous pipeline runner (runs in thread executor)
 # ---------------------------------------------------------------------------
 
-def _run_full_pipeline(prompt: str) -> dict:
-    """Execute Phase 0-4 synchronously.  Called via run_in_executor."""
+def _run_full_pipeline(prompt: str, placer: str = "ga", router: str = "single") -> dict:
+    """Execute Phase 0-4 synchronously.  Called via run_in_executor.
+
+    Args:
+        prompt: Plain-English circuit description.
+        placer: Placement strategy — "ga" (default) or "rl".
+        router: Routing strategy — "single" (default) or "multi".
+    """
     from phase0_groq_translator import run_phase0
     from phase1_eda_engine import CircuitGraph, InitialPlacer, NetlistParser
-    from phase2_genetic_placer import run_phase2
-    from phase3_router import run_phase3
     from phase4_analytics import run_phase4
+
+    place = _resolve_placer(placer)
+    route = _resolve_router(router)
 
     netlist_dict = run_phase0(prompt)
 
@@ -146,9 +216,10 @@ def _run_full_pipeline(prompt: str) -> dict:
     InitialPlacer(netlist.metadata).place(netlist)
     graph = CircuitGraph.from_netlist(netlist)
 
-    graph = run_phase2(graph)
+    graph = place(graph)
 
-    graph, traces, p3 = run_phase3(graph)
+    graph, traces, p3 = route(graph)
+    _LAST_ROUTED.update(graph=graph, traces=traces)   # cache for /export
 
     board = run_phase4(graph, traces, p3)
 
@@ -188,9 +259,25 @@ async def generate(req: GenerateRequest) -> dict:
     if not req.prompt.strip():
         return {"status": "error", "message": "Prompt cannot be empty"}
 
+    # Unknown placer → 400 with a clear message (ga remains the default).
+    if req.placer not in _VALID_PLACERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown placer '{req.placer}'. Use 'ga' or 'rl'.",
+        )
+
+    # Unknown router → 400 with a clear message (single remains the default).
+    if req.router not in _VALID_ROUTERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown router '{req.router}'. Use 'single' or 'multi'.",
+        )
+
     try:
         loop   = asyncio.get_event_loop()
-        result = await loop.run_in_executor(_executor, _run_full_pipeline, req.prompt)
+        result = await loop.run_in_executor(
+            _executor, _run_full_pipeline, req.prompt, req.placer, req.router
+        )
         return result
     except Exception as exc:
         traceback.print_exc()
@@ -208,9 +295,21 @@ async def ws_generate(websocket: WebSocket) -> None:
     try:
         data   = await websocket.receive_json()
         prompt = data.get("prompt", "").strip()
+        placer = data.get("placer", "ga").strip().lower()
+        router = data.get("router", "single").strip().lower()
 
         if not prompt:
             await send({"phase": -1, "status": "error", "message": "Prompt is empty"})
+            return
+
+        if placer not in _VALID_PLACERS:
+            await send({"phase": -1, "status": "error",
+                        "message": f"Unknown placer '{placer}'. Use 'ga' or 'rl'."})
+            return
+
+        if router not in _VALID_ROUTERS:
+            await send({"phase": -1, "status": "error",
+                        "message": f"Unknown router '{router}'. Use 'single' or 'multi'."})
             return
 
         loop = asyncio.get_event_loop()
@@ -256,48 +355,51 @@ async def ws_generate(websocket: WebSocket) -> None:
                         "message": f"Phase 1 (Graph) failed: {exc}"})
             return
 
-        # ── Phase 2 — Genetic Algorithm ───────────────────────────────
+        # ── Phase 2 / 7 — Placement (GA default, RL optional) ─────────
+        _placer_label = _VALID_PLACERS[placer]
         await send({"phase": 2, "status": "running",
-                    "message": "Running Genetic Algorithm placement optimizer..."})
+                    "message": f"Running {_placer_label} placement optimizer..."})
         try:
-            from phase2_genetic_placer import run_phase2
+            place = _resolve_placer(placer)
             hpwl_before = half_perimeter_wire_length(graph)
-            graph = await loop.run_in_executor(_executor, run_phase2, graph)
+            graph = await loop.run_in_executor(_executor, place, graph)
             hpwl_after  = half_perimeter_wire_length(graph)
             pct = (hpwl_before - hpwl_after) / max(hpwl_before, 1e-9) * 100
             await send({
                 "phase": 2, "status": "complete",
                 "message": (
-                    f"GA complete — HPWL {hpwl_before:.1f} → {hpwl_after:.1f} mm"
-                    f" ({pct:.1f}% improvement)"
+                    f"{_placer_label} complete — HPWL {hpwl_before:.1f} → "
+                    f"{hpwl_after:.1f} mm ({pct:.1f}% improvement)"
                 ),
             })
         except Exception as exc:
             await send({"phase": -1, "status": "error",
-                        "message": f"Phase 2 (GA) failed: {exc}"})
+                        "message": f"Placement ({_placer_label}) failed: {exc}"})
             return
 
-        # ── Phase 3 — Maze Router ─────────────────────────────────────
+        # ── Phase 3 / 8 — Router (single-layer default, multi optional) ──
+        _router_label = _VALID_ROUTERS[router]
         await send({"phase": 3, "status": "running",
-                    "message": "Running Lee's Algorithm maze router..."})
+                    "message": f"Running {_router_label}..."})
         try:
-            from phase3_router import run_phase3
-            graph, traces, p3 = await loop.run_in_executor(
-                _executor, run_phase3, graph
-            )
+            route = _resolve_router(router)
+            graph, traces, p3 = await loop.run_in_executor(_executor, route, graph)
+            _LAST_ROUTED.update(graph=graph, traces=traces)   # cache for /export
             routed   = p3.get("total_routed", 0)
             failed   = p3.get("total_failed", 0)
             crossings = p3.get("crossing_count", 0)
+            vias      = p3.get("via_count", 0)
+            via_str   = f", {vias} vias" if router == "multi" else ""
             await send({
                 "phase": 3, "status": "complete",
                 "message": (
                     f"Routing complete — {routed} segments, "
-                    f"{failed} failed, {crossings} crossings"
+                    f"{failed} failed, {crossings} same-layer crossings{via_str}"
                 ),
             })
         except Exception as exc:
             await send({"phase": -1, "status": "error",
-                        "message": f"Phase 3 (Router) failed: {exc}"})
+                        "message": f"Router ({_router_label}) failed: {exc}"})
             return
 
         # ── Phase 4 — Analytics ───────────────────────────────────────
@@ -340,6 +442,137 @@ async def ws_generate(websocket: WebSocket) -> None:
             await send({"phase": -1, "status": "error", "message": str(exc)})
         except Exception:
             pass
+
+
+@app.post("/copilot")
+async def copilot(req: CopilotRequest) -> dict:
+    """RAG design copilot — grounded, cited answer to a design question.
+
+    Uses the most-recently routed board (if any) as read-only design context.
+    Returns {answer, citations, sources}.  Empty query → 400.
+    """
+    if not req.query or not req.query.strip():
+        raise HTTPException(status_code=400, detail="Query must not be empty.")
+
+    from phase10_rag_copilot import run_phase10
+
+    graph = _LAST_ROUTED.get("graph")
+
+    def _ask() -> dict:
+        return run_phase10(req.query, circuit_graph=graph, history=req.history)
+
+    loop   = asyncio.get_event_loop()
+    result = await loop.run_in_executor(_executor, _ask)
+    return {
+        "status":    "complete",
+        "answer":    result["answer"],
+        "citations": result["citations"],
+        "sources":   [c["source"] for c in result["retrieved_chunks"]],
+    }
+
+
+@app.websocket("/copilot/stream")
+async def copilot_stream(websocket: WebSocket) -> None:
+    """WebSocket copilot — streams answer tokens, then a final cited result."""
+    await websocket.accept()
+
+    async def send(msg: dict) -> None:
+        await websocket.send_text(json.dumps(msg))
+
+    try:
+        data    = await websocket.receive_json()
+        query   = (data.get("query") or "").strip()
+        history = data.get("history", [])
+        if not query:
+            await send({"type": "error", "message": "Query must not be empty."})
+            return
+
+        from phase10_rag_copilot import stream_phase10
+
+        graph = _LAST_ROUTED.get("graph")
+        loop  = asyncio.get_event_loop()
+        gen   = stream_phase10(query, circuit_graph=graph, history=history)
+
+        def _next():
+            try:
+                return next(gen)
+            except StopIteration:
+                return None
+
+        while True:
+            item = await loop.run_in_executor(_executor, _next)
+            if item is None:
+                break
+            kind, payload = item
+            if kind == "token":
+                await send({"type": "token", "token": payload})
+            elif kind == "done":
+                await send({"type": "done",
+                            "answer": payload["answer"],
+                            "citations": payload["citations"],
+                            "sources": [c["source"] for c in payload["retrieved_chunks"]]})
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        traceback.print_exc()
+        try:
+            await send({"type": "error", "message": str(exc)})
+        except Exception:
+            pass
+
+
+@app.post("/export")
+async def export() -> dict:
+    """Run Phase 9 manufacturing export on the most-recently routed board.
+
+    Returns a JSON manifest of the produced files plus a download URL for the
+    fab-ready Gerber/drill zip.  Generate a board first (POST /generate or the
+    WebSocket) — the routed result is cached server-side for export.
+    """
+    if not _LAST_ROUTED.get("graph"):
+        raise HTTPException(
+            status_code=400,
+            detail="No routed board to export — run /generate first.",
+        )
+
+    from phase9_export import run_phase9
+
+    def _do_export() -> dict:
+        return run_phase9(_LAST_ROUTED["graph"], _LAST_ROUTED["traces"])
+
+    loop   = asyncio.get_event_loop()
+    result = await loop.run_in_executor(_executor, _do_export)
+
+    board = result["board"]
+    manifest = {
+        "status":         "complete",
+        "board":          board,
+        "layers":         result["layers"],
+        "drill_hits":     result["drill_hits"],
+        "bom_total_qty":  result["bom_total_qty"],
+        "unrouted_nets":  result["unrouted_nets"],
+        "completion_pct": result["completion_pct"],
+        "files": {
+            "copper_gerbers": [p.name for p in result["copper_gerbers"].values()],
+            "outline_gerber": result["outline_gerber"].name,
+            "drill":          result["drill"].name,
+            "bom":            result["bom"].name,
+            "kicad_netlist":  result["kicad_netlist"].name,
+            "zip":            result["zip"].name,
+        },
+        "zip_url": f"/export/download/{result['zip'].name}",
+    }
+    return manifest
+
+
+@app.get("/export/download/{filename}")
+async def export_download(filename: str) -> FileResponse:
+    """Serve a generated manufacturing file (e.g. the fab-ready zip)."""
+    path = (_PROJECT_ROOT / "outputs" / "manufacturing" / filename)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Not found: {filename}")
+    return FileResponse(path, media_type="application/octet-stream",
+                        filename=filename)
 
 
 @app.get("/outputs/{filename}")

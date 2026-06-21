@@ -206,6 +206,16 @@ details[open] summary { color: var(--text); }
       <div class="panel-title">Circuit Prompt</div>
       <textarea id="prompt-input" placeholder="E.g. Connect an ESP32 to an LED via a 330 ohm resistor">Connect an ESP32 to a status LED via a 330 ohm resistor</textarea>
       <br><br>
+      <label for="placer-select" class="metric-label" style="display:block; margin-bottom:5px;">Placement Algorithm</label>
+      <select id="placer-select" style="width:100%; margin-bottom:10px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-family:inherit; font-size:12px; padding:7px 8px; outline:none;">
+        <option value="ga">Genetic Algorithm (default)</option>
+        <option value="rl">RL Agent (Phase 7)</option>
+      </select>
+      <label for="router-select" class="metric-label" style="display:block; margin-bottom:5px;">Routing Strategy</label>
+      <select id="router-select" style="width:100%; margin-bottom:10px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-family:inherit; font-size:12px; padding:7px 8px; outline:none;">
+        <option value="single">Single-Layer (default)</option>
+        <option value="multi">Multi-Layer + Vias (Phase 8)</option>
+      </select>
       <button id="btn-generate" class="btn-generate" onclick="startGenerate()">Generate Circuit</button>
     </div>
 
@@ -330,6 +340,24 @@ details[open] summary { color: var(--text); }
       </div>
     </div>
 
+    <!-- Manufacturing export -->
+    <div class="panel">
+      <div class="panel-title">Manufacturing</div>
+      <button id="btn-export" class="btn-generate" onclick="exportFab()">Download fabrication files</button>
+      <div id="export-msg" class="step-msg" style="margin-top:8px;"></div>
+    </div>
+
+    <!-- Design Copilot (RAG) -->
+    <div class="panel">
+      <details id="copilot-details">
+        <summary class="panel-title" style="margin-bottom:0">Design Copilot ▾</summary>
+        <br>
+        <div id="copilot-log" style="max-height:220px; overflow-y:auto; font-size:11px; line-height:1.5; display:flex; flex-direction:column; gap:8px;"></div>
+        <textarea id="copilot-input" placeholder="Ask about your design — e.g. Is my decoupling correct?" style="min-height:48px; margin-top:8px;"></textarea>
+        <button id="copilot-send" class="btn-generate" onclick="askCopilot()" style="margin-top:6px;">Ask Copilot</button>
+      </details>
+    </div>
+
     <!-- Raw netlist JSON -->
     <div class="panel">
       <details>
@@ -389,6 +417,8 @@ function setStep(phase, status, msg) {
 function startGenerate() {
   const prompt = document.getElementById('prompt-input').value.trim();
   if (!prompt) return;
+  const placer = document.getElementById('placer-select').value;
+  const router = document.getElementById('router-select').value;
 
   document.getElementById('btn-generate').disabled = true;
   resetSteps();
@@ -401,7 +431,7 @@ function startGenerate() {
   const wsUrl = 'ws://' + window.location.host + '/ws/generate';
   _ws = new WebSocket(wsUrl);
 
-  _ws.onopen = () => _ws.send(JSON.stringify({ prompt }));
+  _ws.onopen = () => _ws.send(JSON.stringify({ prompt, placer, router }));
 
   _ws.onmessage = (evt) => {
     let msg;
@@ -683,6 +713,90 @@ function updateDRC(violations) {
         <span class="drc-icon">✓</span><span>${rule.label}</span></div>`;
     }
   });
+}
+
+// ── Manufacturing export ───────────────────────────────────────────────────────
+async function exportFab() {
+  const btn = document.getElementById('btn-export');
+  const msg = document.getElementById('export-msg');
+  btn.disabled = true;
+  msg.textContent = 'Generating fabrication files...';
+  try {
+    const resp = await fetch('/export', { method: 'POST' });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      msg.textContent = 'Export failed: ' + (err.detail || resp.status);
+      return;
+    }
+    const m = await resp.json();
+    msg.textContent = `${m.layers.length} copper layer(s), ${m.drill_hits} drill hits` +
+                      (m.unrouted_nets ? `, ${m.unrouted_nets} unrouted` : '');
+    // Trigger download of the fab zip.
+    window.location = m.zip_url;
+  } catch (e) {
+    msg.textContent = 'Export error: ' + e;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ── Design Copilot (RAG chat) ───────────────────────────────────────────────────
+let _copilotHistory = [];
+function _copilotBubble(role, text, sources) {
+  const log = document.getElementById('copilot-log');
+  const wrap = document.createElement('div');
+  const isUser = role === 'user';
+  wrap.style.cssText = 'padding:7px 9px; border-radius:6px; border:1px solid var(--border); background:' +
+    (isUser ? 'var(--bg)' : 'var(--panel)') + ';';
+  const who = document.createElement('div');
+  who.style.cssText = 'font-size:9px; text-transform:uppercase; letter-spacing:0.6px; color:var(--dim); margin-bottom:3px;';
+  who.textContent = isUser ? 'You' : 'Copilot';
+  const body = document.createElement('div');
+  body.style.color = 'var(--text)';
+  body.textContent = text;
+  wrap.appendChild(who); wrap.appendChild(body);
+  if (sources && sources.length) {
+    const cite = document.createElement('div');
+    cite.style.cssText = 'margin-top:5px; font-size:10px; color:var(--emerald);';
+    cite.textContent = 'Sources: ' + sources.join(', ');
+    wrap.appendChild(cite);
+  }
+  log.appendChild(wrap);
+  log.scrollTop = log.scrollHeight;
+  return body;
+}
+
+async function askCopilot() {
+  const input = document.getElementById('copilot-input');
+  const btn = document.getElementById('copilot-send');
+  const q = input.value.trim();
+  if (!q) return;
+  input.value = '';
+  btn.disabled = true;
+  _copilotBubble('user', q);
+  const pending = _copilotBubble('assistant', '…');
+  try {
+    const resp = await fetch('/copilot', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: q, history: _copilotHistory }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) { pending.textContent = 'Error: ' + (data.detail || resp.status); return; }
+    pending.textContent = data.answer;
+    if (data.citations && data.citations.length) {
+      const cite = document.createElement('div');
+      cite.style.cssText = 'margin-top:5px; font-size:10px; color:var(--emerald);';
+      cite.textContent = 'Sources: ' + data.citations.join(', ');
+      pending.parentNode.appendChild(cite);
+    }
+    _copilotHistory.push({ role: 'user', content: q });
+    _copilotHistory.push({ role: 'assistant', content: data.answer });
+  } catch (e) {
+    pending.textContent = 'Error: ' + e;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // ── JSON viewer ───────────────────────────────────────────────────────────────

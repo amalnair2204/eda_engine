@@ -9,3 +9,11 @@ dist/
 build/
 .venv/
 venv/
+
+# Phase 7 — trained RL policy (binary artifact)
+models/
+
+# Phase 10 — RAG vector store + downloaded embedding models (runtime artifacts)
+vectorstore/
+.cache/
+*.sqlite3

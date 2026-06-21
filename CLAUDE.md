@@ -74,6 +74,10 @@ Plain English Prompt
 | 4     | Analytics Engine              | phase4_analytics.py         | ✅ Complete    |
 | 5     | UI Shell (Claude Design)      | frontend/                   | ⬜ Not started |
 | 6     | Full Integration              | app.py                      | ✅ Complete    |
+| **7** | RL Placement Agent (alt. P2)  | phase7_rl_placer.py         | ✅ Complete    |
+| **8** | Multi-Layer Router (alt. P3)  | phase8_multilayer_router.py | ✅ Complete    |
+| **9** | Manufacturing Export          | phase9_export.py            | ✅ Complete    |
+| **10**| RAG Design Copilot            | phase10_rag_copilot.py      | ✅ Complete    |
 
 **Update this table at the end of every phase.**
 
@@ -223,6 +227,119 @@ pytest tests/ -v
 
 # Phase 6 (full stack)
 uvicorn app:app --reload
+
+# Phase 7 — RL placer (Windows: use python -m forms)
+python -m train_phase7_rl          # train policy -> models/phase7_rl_placer.zip
+python phase7_rl_placer.py         # run RL placement on the sample netlist
+python -m benchmark_placement      # random vs GA vs RL -> outputs/benchmark_results.md
+python -m pytest tests/test_phase7.py -v
+# In the API/UI: pass placer="rl" (default "ga") to /generate or the WS request.
+```
+
+---
+
+## Phase 7 — RL Placement Agent (alternative to Phase 2)
+Phase 7 is a **swappable Placer strategy**, selectable at runtime as an
+alternative to the Phase 2 Genetic Algorithm — NOT a stage that runs after
+Phase 6.  It learns a policy (MaskablePPO) that places components sequentially
+to minimise HPWL, reusing the Phase 2/1 HPWL function as its reward.
+
+- `phase7_rl_placer.py` — `PlacementEnv` (Gymnasium) + `RLPlacer` + `run_phase7(graph) -> CircuitGraph` (mirrors `run_phase2`).
+- `train_phase7_rl.py` — trains over a circuit suite, holds out ≥2 for eval.
+- `benchmark_placement.py` — honest head-to-head: random vs GA vs RL.
+- A minimal `Placer` Protocol lives in `phase1_eda_engine.py`; both `run_phase2`
+  and `run_phase7` satisfy it.  **GA remains the default everywhere.**
+- New `.env` keys: `RL_TIMESTEPS`, `RL_LEARNING_RATE`.
+
+---
+
+## Phase 8 — Multi-Layer Router (alternative to Phase 3)
+Phase 8 is a **swappable Router strategy**, selectable at runtime as an
+alternative to the single-layer Phase 3 router — NOT a stage after Phase 6.
+It extends Lee's algorithm to a 3D `(x, y, layer)` grid with via insertion,
+collapsing same-layer crossings structurally.
+
+- `phase8_multilayer_router.py` — `MultiLayerGrid` + `LayeredLeeRouter`
+  (Dijkstra with via cost + per-layer direction bias) + `MultiLayerNetRouter`
+  + `run_phase8(graph) -> (graph, traces, metrics)` (mirrors `run_phase3`).
+- No two nets share an `(x, y, layer)` cell → same-layer crossings are 0 by
+  construction; a crossing-permitted last-resort fallback guarantees 100%
+  completion (with minimised, honestly-counted crossings) on dense boards.
+- `benchmark_routing.py` — single vs multi on one shared placement.
+- A minimal `Router` Protocol lives in `phase1_eda_engine.py`; both `run_phase3`
+  and `run_phase8` satisfy it.  **Single-layer remains the default everywhere.**
+- Phase 4 is additive: `via_count` + `per_layer_crossings` (backward-compatible
+  with single-layer output, which is treated as all on layer 0).
+- New `.env` keys: `ROUTING_LAYERS`, `VIA_COST`, `LAYER_DIR_BIAS`.
+
+```bash
+# Phase 8 — Multi-Layer router (Windows: python -m forms)
+python phase8_multilayer_router.py   # multi-layer route on the sample netlist
+python -m benchmark_routing          # single vs multi -> outputs/benchmark_routing.md
+python -m pytest tests/test_phase8.py -v
+# In the API/UI: pass router="multi" (default "single") to /generate or the WS.
+```
+
+---
+
+## Phase 9 — Manufacturing Export (terminal stage)
+Phase 9 is a **terminal export stage** (NOT a swappable strategy): it converts a
+placed + routed board into fab-ready files.  Consumes EITHER single-layer
+Phase 3 output (RoutedTrace → all layer 0) OR multi-layer Phase 8 output
+(LayeredTrace with per-cell layers + vias).
+
+- `phase9_export.py` — `run_phase9(graph, routed_paths) -> dict` (file paths +
+  completion info).  Reads the graph read-only; writes under
+  `outputs/manufacturing/`.
+- **Gerbers + Excellon drill are generated with `gerbonara`** (RS-274X never
+  hand-rolled): one copper Gerber per layer (`F_Cu`, `B_Cu`, …), an `Edge_Cuts`
+  outline, and a `.drl` (one hit per via + through-hole pad, grouped by tool).
+- Also writes `bom.csv` (grouped, refdes-derived), a KiCad `.net` S-expression,
+  a matplotlib `outputs/phase9_preview.png`, and a fab-ready
+  `<board>_gerbers.zip`.
+- 1 grid cell = `GRID_PITCH_MM` mm; grid origin is bottom-left (no Y flip).
+- `app.py`: `POST /export` exports the most-recently routed board (cached
+  server-side) and returns a manifest + `GET /export/download/<zip>`.  Frontend
+  has one "Download fabrication files" button.
+- New `.env` keys: `GRID_PITCH_MM`, `TRACE_WIDTH_MM`, `PAD_DIAMETER_MM`,
+  `VIA_DRILL_MM`, `PAD_DRILL_MM`.
+
+```bash
+# Phase 9 — Manufacturing export (Windows: python -m forms)
+python phase9_export.py              # export sample board -> outputs/manufacturing/
+python -m pytest tests/test_phase9.py -v
+# In the API/UI: click "Download fabrication files" (POST /export) after generating.
+```
+
+---
+
+## Phase 10 — RAG Design Copilot (advisory stage)
+Phase 10 is a **retrieval-augmented chat copilot** grounded in a knowledge base
+(component datasheets + EEE rules) plus the user's current design.  It gives
+**cited** answers and refinement suggestions.  Advisory only — it reads the
+`CircuitGraph` READ-ONLY and never mutates it or pipeline state; any change is
+surfaced as a suggestion / revised prompt to re-run through Phase 0.
+
+- `knowledge/` — seed corpus (`.md`/`.txt`/`.pdf`); `ingest_knowledge.py` chunks +
+  embeds it (sentence-transformers) into a persistent Chroma store at
+  `VECTOR_DB_PATH`.  Also ingests the EEE Domain Constraints from this file.
+- `phase10_rag_copilot.py` — retriever + read-only design summary + grounded
+  Groq generation.  `run_phase10(query, circuit_graph=None, history=None) ->
+  {answer, citations, retrieved_chunks}`; `stream_phase10(...)` for token streaming.
+- Embeddings are local (no API key); generation reuses the Groq client.  The
+  system prompt forbids answering outside the provided context and requires
+  citing source filenames or saying "not in the knowledge base".
+- `app.py`: `POST /copilot` (full answer + citations) and `WS /copilot/stream`
+  (token streaming).  Frontend has an additive collapsible "Design Copilot" panel.
+- New `.env` keys: `EMBEDDING_MODEL`, `VECTOR_DB_PATH`, `RAG_TOP_K`.  The vector
+  store + downloaded models are gitignored (runtime artifacts).
+
+```bash
+# Phase 10 — RAG copilot (Windows: python -m forms).  Ingest FIRST.
+python -m ingest_knowledge           # build vector store from knowledge/ (+ CLAUDE.md EEE)
+python phase10_rag_copilot.py "Is my decoupling correct for an ESP32?"
+python -m pytest tests/test_phase10.py -v   # Groq mocked — no API key needed
+# In the API/UI: open the "Design Copilot" panel (POST /copilot) after generating.
 ```
 
 ---

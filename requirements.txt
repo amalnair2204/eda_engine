@@ -8,3 +8,17 @@ fastapi>=0.111.0
 uvicorn[standard]>=0.30.0
 python-multipart>=0.0.9
 websockets>=12.0
+
+# Phase 7 — Reinforcement Learning placement agent (pinned, mutually compatible)
+torch>=2.8,<3.0
+gymnasium==1.3.0
+stable-baselines3==2.9.0
+sb3-contrib==2.9.0
+
+# Phase 9 — manufacturing export (Gerber RS-274X / Excellon drill)
+gerbonara==1.6.3
+
+# Phase 10 — RAG design copilot (local embeddings + vector store + PDF ingest)
+sentence-transformers==5.6.0
+chromadb==1.5.9
+pypdf==6.13.3

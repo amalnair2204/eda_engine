@@ -68,6 +68,11 @@ class GenerateRequest(BaseModel):
     router: str = "single"  # "single" (default, Phase 3) | "multi" (Phase 8)
 
 
+class ExploreRequest(BaseModel):
+    """Request body for POST /explore (all fields optional)."""
+    config: dict | None = None   # overrides phase11 _default_config() when set
+
+
 # Valid placement strategies, mapping the request value to a human label.
 _VALID_PLACERS = {"ga": "Genetic Algorithm", "rl": "RL agent"}
 
@@ -219,7 +224,8 @@ def _run_full_pipeline(prompt: str, placer: str = "ga", router: str = "single") 
     graph = place(graph)
 
     graph, traces, p3 = route(graph)
-    _LAST_ROUTED.update(graph=graph, traces=traces)   # cache for /export
+    # Cache for /export and /explore (netlist_dict enables a fresh re-place).
+    _LAST_ROUTED.update(graph=graph, traces=traces, netlist=netlist_dict)
 
     board = run_phase4(graph, traces, p3)
 
@@ -384,7 +390,8 @@ async def ws_generate(websocket: WebSocket) -> None:
         try:
             route = _resolve_router(router)
             graph, traces, p3 = await loop.run_in_executor(_executor, route, graph)
-            _LAST_ROUTED.update(graph=graph, traces=traces)   # cache for /export
+            # Cache for /export and /explore.
+            _LAST_ROUTED.update(graph=graph, traces=traces, netlist=netlist_dict)
             routed   = p3.get("total_routed", 0)
             failed   = p3.get("total_failed", 0)
             crossings = p3.get("crossing_count", 0)
@@ -563,6 +570,53 @@ async def export() -> dict:
         "zip_url": f"/export/download/{result['zip'].name}",
     }
     return manifest
+
+
+def _explore_to_json(result: dict) -> dict:
+    """Serialise a run_phase11 result to a JSON-safe dict for the frontend."""
+    rec = result.get("recommendation")
+    return {
+        "status":         "complete",
+        "objectives":     result["objectives"],
+        "candidates":     result["candidates"],   # already JSON-friendly dicts
+        "pareto_ids":     [c["id"] for c in result["pareto"]],
+        "recommendation": rec,                     # dict with "rationale" or None
+        "pareto_png_url": f"/outputs/{Path(result['pareto_png']).name}",
+        "results_md":     Path(result["results_md"]).name,
+    }
+
+
+@app.post("/explore")
+async def explore(req: ExploreRequest) -> dict:
+    """Phase 11 design-space exploration over the most-recently generated netlist.
+
+    Sweeps multiple placement/routing strategies, scores each on the stated
+    objectives, and returns the candidate table, the Pareto-optimal set, and a
+    recommended trade-off.  Generate a board first (POST /generate or the
+    WebSocket) — the netlist is cached server-side for re-exploration.
+    """
+    if not _LAST_ROUTED.get("netlist"):
+        raise HTTPException(
+            status_code=400,
+            detail="No netlist to explore — run /generate first.",
+        )
+
+    netlist_dict = _LAST_ROUTED["netlist"]
+    config = req.config or None
+
+    def _do_explore() -> dict:
+        from phase1_eda_engine import CircuitGraph, InitialPlacer, NetlistParser
+        from phase11_explorer import run_phase11
+        # Fresh graph from the cached netlist — clean seed positions, original
+        # grid (Phase 11 deep-copies per candidate, so this stays read-only).
+        netlist = NetlistParser().parse(netlist_dict)
+        InitialPlacer(netlist.metadata).place(netlist)
+        graph = CircuitGraph.from_netlist(netlist)
+        return run_phase11(graph, config)
+
+    loop   = asyncio.get_event_loop()
+    result = await loop.run_in_executor(_executor, _do_explore)
+    return _explore_to_json(result)
 
 
 @app.get("/export/download/{filename}")

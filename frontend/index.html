@@ -347,6 +347,14 @@ details[open] summary { color: var(--text); }
       <div id="export-msg" class="step-msg" style="margin-top:8px;"></div>
     </div>
 
+    <!-- Phase 11 — Design-space exploration -->
+    <div class="panel">
+      <div class="panel-title">Design-Space Exploration</div>
+      <button id="btn-explore" class="btn-generate" onclick="exploreDesignSpace()">Explore design space</button>
+      <div id="explore-msg" class="step-msg" style="margin-top:8px;"></div>
+      <div id="explore-results" style="margin-top:8px; font-size:11px; overflow-x:auto;"></div>
+    </div>
+
     <!-- Design Copilot (RAG) -->
     <div class="panel">
       <details id="copilot-details">
@@ -735,6 +743,56 @@ async function exportFab() {
     window.location = m.zip_url;
   } catch (e) {
     msg.textContent = 'Export error: ' + e;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ── Phase 11 — Design-space exploration ─────────────────────────────────────────
+async function exploreDesignSpace() {
+  const btn = document.getElementById('btn-explore');
+  const msg = document.getElementById('explore-msg');
+  const out = document.getElementById('explore-results');
+  btn.disabled = true;
+  out.innerHTML = '';
+  msg.textContent = 'Exploring design space (sweeping placement/routing strategies)…';
+  try {
+    const resp = await fetch('/explore', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      msg.textContent = 'Explore failed: ' + (err.detail || resp.status);
+      return;
+    }
+    const data = await resp.json();
+    const rec = data.recommendation;
+    const paretoIds = new Set(data.pareto_ids || []);
+    msg.textContent = `${data.candidates.length} candidates, ${paretoIds.size} Pareto-optimal.`;
+
+    let html = '<table style="width:100%; border-collapse:collapse;">' +
+      '<tr style="color:var(--dim); text-align:left;">' +
+      '<th>Candidate</th><th>HPWL</th><th>Cross</th><th>Len</th>' +
+      '<th>Compl%</th><th>Pareto</th><th>Rec</th></tr>';
+    for (const c of data.candidates) {
+      const isRec = rec && c.id === rec.id;
+      html += '<tr style="border-top:1px solid var(--border);' +
+        (isRec ? 'background:var(--bg);' : '') + '">' +
+        `<td>${c.id}</td>` +
+        `<td>${c.metrics.hpwl_mm.toFixed(1)}</td>` +
+        `<td>${c.metrics.crossings}</td>` +
+        `<td>${c.metrics.trace_length_mm.toFixed(0)}</td>` +
+        `<td>${c.metrics.completion_pct.toFixed(0)}</td>` +
+        `<td>${paretoIds.has(c.id) ? '✅' : '—'}</td>` +
+        `<td>${isRec ? '⭐' : '—'}</td></tr>`;
+    }
+    html += '</table>';
+    if (rec) {
+      html += `<div style="margin-top:8px; color:var(--emerald);">` +
+        `Recommended: <b>${rec.id}</b> — ${rec.rationale}</div>`;
+    }
+    out.innerHTML = html;
+  } catch (e) {
+    msg.textContent = 'Explore error: ' + e;
   } finally {
     btn.disabled = false;
   }

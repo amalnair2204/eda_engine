@@ -124,6 +124,9 @@ class BoardMetrics:
     trace_metrics: list[TraceMetrics]
     # EEE rule violations
     violations: list[str]
+    # Multi-layer routing (Phase 8 — additive; 0 / single-layer for Phase 3)
+    via_count: int = 0
+    per_layer_crossings: dict = field(default_factory=dict)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -328,6 +331,42 @@ class AnalyticsEngine:
         return result
 
     # ------------------------------------------------------------------
+    # Multi-layer metrics (backward-compatible with single-layer Phase 3)
+    # ------------------------------------------------------------------
+
+    def _layer_metrics(self) -> tuple[int, dict[int, int]]:
+        """Compute (via_count, per_layer_crossings) from the traces.
+
+        Traces lacking layer info (Phase 3 RoutedTrace) are treated as all on
+        layer 0, so single-layer output yields {0: <crossings>} and 0 vias.
+        A crossing is an interior cell on a layer occupied by 2+ nets.
+
+        Returns:
+            (unique via count, {layer: crossing-cell count}).
+        """
+        from collections import defaultdict
+
+        cell_nets: dict[tuple, set] = defaultdict(set)
+        via_cells: set[tuple[int, int]] = set()
+        for t in self._traces:
+            layers = getattr(t, "layers", None)
+            for i, cell in enumerate(t.path[1:-1], start=1):
+                layer = layers[i] if layers is not None else 0
+                cell_nets[(cell[0], cell[1], layer)].add(t.net_id)
+            for v in getattr(t, "vias", []):
+                via_cells.add(tuple(v))
+
+        per_layer: dict[int, int] = defaultdict(int)
+        for (_, _, layer), nets in cell_nets.items():
+            if len(nets) > 1:
+                per_layer[layer] += 1
+        # Prefer the router's own counts when present (authoritative).
+        via_count = self._p3.get("via_count", len(via_cells))
+        if "per_layer_crossings" in self._p3 and self._p3["per_layer_crossings"]:
+            per_layer = dict(self._p3["per_layer_crossings"])
+        return via_count, dict(per_layer)
+
+    # ------------------------------------------------------------------
     # Main compute method
     # ------------------------------------------------------------------
 
@@ -356,6 +395,8 @@ class AnalyticsEngine:
 
         net_ids = {e.net_id for e in self._graph.edges}
 
+        via_count, per_layer_crossings = self._layer_metrics()
+
         return BoardMetrics(
             design_name=self._graph.metadata.name,
             hpwl_mm=half_perimeter_wire_length(self._graph) * CELL_SIZE_MM,
@@ -373,6 +414,8 @@ class AnalyticsEngine:
             max_signal_delay_ps=max_delay,
             trace_metrics=tm_list,
             violations=violations,
+            via_count=via_count,
+            per_layer_crossings=per_layer_crossings,
         )
 
 

@@ -31,6 +31,17 @@ _PROJECT_ROOT = Path(__file__).parent
 _GENERATED_DIR = _PROJECT_ROOT / "netlists" / "generated"
 
 # ---------------------------------------------------------------------------
+# Completion limits
+# ---------------------------------------------------------------------------
+# Upper bound on tokens the model may emit for one netlist.  Kept at 4096 to
+# stay under the free "on_demand" tier's 8000 tokens-per-minute cap: a larger
+# value (e.g. 8192) pushes prompt + system + max_tokens past 8000 and Groq
+# rejects the request with HTTP 413 rate_limit_exceeded.  4096 output tokens
+# plus the input fit a typical netlist, and JSON mode guarantees well-formed
+# output; if a netlist still truncates here, simplify the prompt or upgrade tier.
+MAX_COMPLETION_TOKENS = 4096
+
+# ---------------------------------------------------------------------------
 # Custom exceptions
 # ---------------------------------------------------------------------------
 
@@ -46,6 +57,17 @@ class NetlistValidationError(ValueError):
     """Raised when the JSON does not conform to the expected netlist schema."""
 
 
+# Follow-up sent on the single automatic retry when a response came back with
+# components but no "nets" array (gpt-oss occasionally drops it).
+_NETS_RETRY_INSTRUCTION: str = (
+    "Your previous JSON was INVALID: it had no non-empty top-level \"nets\" "
+    "array inside \"netlist\". Regenerate the COMPLETE netlist for the same "
+    "request, this time including a non-empty \"nets\" array where every "
+    "connection between component pins is represented as a net. Output ONLY "
+    "the JSON object."
+)
+
+
 # ---------------------------------------------------------------------------
 # System prompt
 # ---------------------------------------------------------------------------
@@ -57,6 +79,20 @@ OUTPUT RULES -- follow these without exception:
 1. Output ONLY valid JSON. No markdown, no backticks, no prose, no code fences.
 2. The root key must be "netlist" and contain exactly three keys:
    "metadata", "components", "nets".
+3. The "nets" array is MANDATORY and MUST be a NON-EMPTY top-level array inside
+   "netlist". EVERY electrical connection between component pins MUST be
+   represented as an entry in "nets". A netlist that contains "components" but
+   an empty or missing "nets" array is INVALID and must NEVER be produced --
+   even a single-component design lists its power/ground nets. Always emit
+   "nets" alongside "components".
+
+REQUIRED SHAPE (every response must have all three keys, nets non-empty):
+{"netlist": {
+  "metadata": { ... },
+  "components": [ { "id": "U1", ... }, ... ],
+  "nets": [ { "id": "VCC", "type": "POWER",
+              "connected_pins": [{"component_id": "U1", "pin_id": "VCC"}] }, ... ]
+}}
 
 SCHEMA:
 {
@@ -496,6 +532,7 @@ class GroqTranslator:
         """
         self._model = model
         self._client = Groq(api_key=api_key)
+        self._last_finish_reason: str | None = None
 
     # ------------------------------------------------------------------
     # Public interface
@@ -524,19 +561,37 @@ class GroqTranslator:
         """
         raw = self._call_api(prompt)
         netlist = self._parse_response(raw)
+        # Single automatic retry: gpt-oss sometimes returns components but no
+        # "nets" array.  Re-ask once with an explicit corrective instruction
+        # before surfacing the validation error.
+        if self._missing_nets(netlist):
+            print("[Phase 0] Response missing 'nets' array — retrying once ...")
+            raw = self._call_api(prompt, retry_instruction=_NETS_RETRY_INSTRUCTION)
+            netlist = self._parse_response(raw)
         self._validate_schema(netlist)
         self._save_netlist(netlist, prompt)
         return netlist
+
+    @staticmethod
+    def _missing_nets(netlist: dict) -> bool:
+        """True when the parsed netlist has no non-empty top-level 'nets' array."""
+        try:
+            nets = netlist["netlist"]["nets"]
+        except (KeyError, TypeError):
+            return True
+        return not isinstance(nets, list) or len(nets) == 0
 
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _call_api(self, prompt: str) -> str:
+    def _call_api(self, prompt: str, retry_instruction: str | None = None) -> str:
         """Issue the chat-completion request to Groq and return the raw text.
 
         Args:
-            prompt: User circuit description.
+            prompt:            User circuit description.
+            retry_instruction: Optional corrective follow-up appended as an extra
+                               user turn (used by the missing-'nets' retry).
 
         Returns:
             Raw string content from the model's first choice.
@@ -549,12 +604,18 @@ class GroqTranslator:
             *FEW_SHOT_EXAMPLES,
             {"role": "user", "content": prompt},
         ]
+        if retry_instruction:
+            messages.append({"role": "user", "content": retry_instruction})
         try:
             response = self._client.chat.completions.create(
                 model=self._model,
                 messages=messages,
                 temperature=0.2,
-                max_tokens=4096,
+                max_tokens=MAX_COMPLETION_TOKENS,
+                # JSON mode: guarantees a single valid JSON object.  Requires the
+                # word "json" to appear in the messages (it does — see the system
+                # prompt's "Output ONLY valid JSON" rule).
+                response_format={"type": "json_object"},
             )
         except APITimeoutError as exc:
             raise GroqAPIError(f"Groq API request timed out: {exc}") from exc
@@ -565,7 +626,14 @@ class GroqTranslator:
                 f"Groq API returned HTTP {exc.status_code}: {exc.message}"
             ) from exc
 
-        return response.choices[0].message.content
+        choice = response.choices[0]
+        # Record why generation stopped so a truncated netlist surfaces as
+        # finish_reason="length" instead of a silent JSON decode error.
+        self._last_finish_reason = getattr(choice, "finish_reason", None)
+        # Parse ONLY the message content (the JSON).  gpt-oss reasoning models
+        # return chain-of-thought in a separate `message.reasoning` field which
+        # must never be fed to the JSON parser.
+        return choice.message.content or ""
 
     def _parse_response(self, raw: str) -> dict:
         """Extract and parse a JSON object from the raw model response.
@@ -600,8 +668,19 @@ class GroqTranslator:
         try:
             return json.loads(text)
         except json.JSONDecodeError as exc:
+            finish = self._last_finish_reason
+            hint = ""
+            if finish == "length":
+                hint = (
+                    " — response was TRUNCATED (finish_reason='length'); the "
+                    f"netlist exceeded max_tokens ({MAX_COMPLETION_TOKENS}). "
+                    "MAX_COMPLETION_TOKENS is capped at 4096 to stay under the "
+                    "free tier's 8000 TPM limit, so simplify the prompt (fewer/"
+                    "smaller components) or upgrade the Groq tier to raise the cap."
+                )
             raise NetlistParseError(
-                f"Could not decode JSON from model response: {exc}\n"
+                f"Could not decode JSON from model response: {exc} "
+                f"(finish_reason={finish!r}){hint}\n"
                 f"--- raw response begin ---\n{raw[:500]}\n--- raw response end ---"
             ) from exc
 

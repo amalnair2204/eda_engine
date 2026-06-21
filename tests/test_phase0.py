@@ -22,12 +22,30 @@ from phase0_groq_translator import (
     FEW_SHOT_EXAMPLES,
     GroqTranslator,
     GroqAPIError,
+    MAX_COMPLETION_TOKENS,
     NetlistParseError,
     NetlistValidationError,
     _check_component,
     _check_net,
     run_phase0,
 )
+
+
+def _mock_groq_response(content, finish_reason="stop", reasoning=None):
+    """Build a MagicMock shaped like a Groq chat-completion response.
+
+    Mirrors response.choices[0].message.content / .reasoning and
+    response.choices[0].finish_reason.
+    """
+    message = MagicMock()
+    message.content = content
+    message.reasoning = reasoning
+    choice = MagicMock()
+    choice.message = message
+    choice.finish_reason = finish_reason
+    response = MagicMock()
+    response.choices = [choice]
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +288,109 @@ def test_translate_propagates_api_error(translator, monkeypatch):
     with patch.object(translator, "_call_api", side_effect=GroqAPIError("timeout")):
         with pytest.raises(GroqAPIError, match="timeout"):
             translator.translate("some prompt")
+
+
+# ---------------------------------------------------------------------------
+# 8b. _call_api -- mocked Groq SDK response (complete JSON, json mode, reasoning)
+# ---------------------------------------------------------------------------
+
+def test_call_api_parses_complete_json_and_uses_json_mode(translator, valid_netlist):
+    """_call_api returns the message content of a complete response, sets json
+    mode + MAX_COMPLETION_TOKENS, captures finish_reason, and the parser then
+    handles the complete JSON object correctly."""
+    raw_json = json.dumps(valid_netlist)
+    create = MagicMock(return_value=_mock_groq_response(raw_json, finish_reason="stop"))
+    translator._client.chat.completions.create = create
+
+    raw = translator._call_api("Connect an ESP32 to an LED")
+    assert raw == raw_json
+    assert translator._last_finish_reason == "stop"
+
+    # JSON mode + token limit were actually passed to the SDK.
+    kwargs = create.call_args.kwargs
+    assert kwargs["response_format"] == {"type": "json_object"}
+    assert kwargs["max_tokens"] == MAX_COMPLETION_TOKENS
+
+    # The complete JSON parses + validates end-to-end.
+    parsed = translator._parse_response(raw)
+    assert translator._validate_schema(parsed) is True
+    assert parsed == valid_netlist
+
+
+def test_call_api_ignores_reasoning_field(translator, valid_netlist):
+    """Reasoning content (gpt-oss) lives in message.reasoning and must NOT be
+    parsed — only message.content (the JSON) is returned."""
+    raw_json = json.dumps(valid_netlist)
+    translator._client.chat.completions.create = MagicMock(
+        return_value=_mock_groq_response(
+            raw_json, reasoning="Let me think step by step... not JSON {{{"
+        )
+    )
+    raw = translator._call_api("prompt")
+    assert raw == raw_json
+    assert translator._parse_response(raw) == valid_netlist
+
+
+def test_parse_truncated_response_reports_length(translator):
+    """A truncated (finish_reason='length') response raises NetlistParseError
+    whose message names the truncation rather than a silent decode error."""
+    translator._last_finish_reason = "length"
+    truncated = '{"netlist": {"metadata": {"name": "X"}, "components": [{"id": "U1"'
+    with pytest.raises(NetlistParseError, match="TRUNCATED"):
+        translator._parse_response(truncated)
+
+
+# ---------------------------------------------------------------------------
+# 8c. translate -- missing 'nets' triggers a single automatic retry
+# ---------------------------------------------------------------------------
+
+def test_translate_retries_when_nets_missing(translator, valid_netlist):
+    """A first response with components but no 'nets' must trigger ONE retry;
+    the valid second response is then returned."""
+    no_nets = {"netlist": {
+        "metadata": valid_netlist["netlist"]["metadata"],
+        "components": valid_netlist["netlist"]["components"],
+        # no "nets" key at all
+    }}
+    create = MagicMock(side_effect=[
+        _mock_groq_response(json.dumps(no_nets)),     # 1st call: missing nets
+        _mock_groq_response(json.dumps(valid_netlist)),  # retry: valid
+    ])
+    translator._client.chat.completions.create = create
+
+    result = translator.translate("Connect an ESP32 to an LED")
+
+    assert create.call_count == 2, "expected exactly one retry"
+    assert len(result["netlist"]["nets"]) == 2
+    # Retry call carried the corrective follow-up message.
+    retry_msgs = create.call_args_list[1].kwargs["messages"]
+    assert any("nets" in m["content"] for m in retry_msgs if m["role"] == "user")
+
+
+def test_translate_no_retry_when_valid(translator, valid_netlist):
+    """A first valid response (with nets) must NOT trigger a retry."""
+    create = MagicMock(return_value=_mock_groq_response(json.dumps(valid_netlist)))
+    translator._client.chat.completions.create = create
+
+    result = translator.translate("Connect an ESP32 to an LED")
+
+    assert create.call_count == 1, "valid response must not retry"
+    assert len(result["netlist"]["nets"]) == 2
+
+
+def test_translate_raises_when_nets_missing_after_retry(translator, valid_netlist):
+    """If 'nets' is still missing after the single retry, the validation error
+    is raised (no silent failure, no further retries)."""
+    no_nets = {"netlist": {
+        "metadata": valid_netlist["netlist"]["metadata"],
+        "components": valid_netlist["netlist"]["components"],
+    }}
+    create = MagicMock(return_value=_mock_groq_response(json.dumps(no_nets)))
+    translator._client.chat.completions.create = create
+
+    with pytest.raises(NetlistValidationError, match="nets"):
+        translator.translate("Connect an ESP32 to an LED")
+    assert create.call_count == 2, "exactly one retry, then give up"
 
 
 # ---------------------------------------------------------------------------

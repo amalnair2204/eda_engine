@@ -115,7 +115,7 @@ def test_kicad_netlist_contains_all_components_and_nets(exported) -> None:
 # ---------------------------------------------------------------------------
 
 def test_fab_zip_contains_gerbers_and_drill(exported) -> None:
-    """The fab zip exists and contains copper + outline Gerbers + the drill."""
+    """The fab zip contains copper + outline Gerbers, drill, KiCad netlist, BOM."""
     _graph, _traces, result = exported
     zpath = result["zip"]
     assert zpath.exists()
@@ -129,6 +129,11 @@ def test_fab_zip_contains_gerbers_and_drill(exported) -> None:
     assert result["outline_gerber"].name in names
     assert result["drill"].name in names
     assert any(n.endswith("Edge_Cuts.gbr") for n in names)
+    # KiCad netlist + per-board BOM present.
+    assert result["kicad_netlist"].name in names
+    assert result["bom"].name in names
+    assert any(n.endswith(".net") for n in names)
+    assert any(n.endswith("_bom.csv") for n in names)
 
 
 # ---------------------------------------------------------------------------

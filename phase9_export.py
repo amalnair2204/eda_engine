@@ -303,9 +303,9 @@ def derive_refdes(graph: CircuitGraph) -> "OrderedDict[str, str]":
 
 
 def _write_bom(
-    graph: CircuitGraph, refmap: dict, out_dir: Path,
+    graph: CircuitGraph, refmap: dict, board: str, out_dir: Path,
 ) -> tuple[Path, int]:
-    """Write a grouped BOM CSV.  Returns (path, total quantity)."""
+    """Write a grouped per-board BOM CSV.  Returns (path, total quantity)."""
     groups: "OrderedDict[tuple, list[str]]" = OrderedDict()
     meta: dict[tuple, tuple] = {}
     for cid in sorted(graph.nodes.keys()):
@@ -316,7 +316,7 @@ def _write_bom(
         groups.setdefault(key, []).append(refmap[cid])
         meta[key] = (comp.comp_type, value, footprint)
 
-    path = out_dir / "bom.csv"
+    path = out_dir / f"{board}_bom.csv"
     total_qty = 0
     with path.open("w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
@@ -449,15 +449,17 @@ def _render_preview(
 
 def _bundle_zip(
     copper: dict[int, Path], outline: Path, drill: Path,
-    board: str, out_dir: Path,
+    netlist: Path, bom: Path, board: str, out_dir: Path,
 ) -> Path:
-    """Bundle all Gerbers + drill into a fab-ready zip."""
+    """Bundle all Gerbers + drill + KiCad netlist + BOM into a fab-ready zip."""
     path = out_dir / f"{board}_gerbers.zip"
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
         for p in copper.values():
             zf.write(p, p.name)
         zf.write(outline, outline.name)
         zf.write(drill, drill.name)
+        zf.write(netlist, netlist.name)
+        zf.write(bom, bom.name)
     return path
 
 
@@ -520,12 +522,13 @@ def run_phase9(graph: CircuitGraph, routed_paths: list) -> dict:
     drill, hits = _write_drill(graph, routed_paths, cfg, board, _MFG_DIR)
 
     refmap = derive_refdes(graph)
-    bom, total_qty = _write_bom(graph, refmap, _MFG_DIR)
+    bom, total_qty = _write_bom(graph, refmap, board, _MFG_DIR)
     netlist = _write_kicad_netlist(graph, refmap, board, _MFG_DIR)
 
     preview = _render_preview(graph, routed_paths, cfg,
                               _OUTPUT_DIR / "phase9_preview.png")
-    zip_path = _bundle_zip(copper, outline, drill, board, _MFG_DIR)
+    zip_path = _bundle_zip(copper, outline, drill, netlist, bom,
+                           board, _MFG_DIR)
 
     print(f"[Phase 9] Copper layers : {sorted(copper)}  "
           f"({len(copper)} Gerber(s))")

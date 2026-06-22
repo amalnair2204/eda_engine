@@ -1,0 +1,25 @@
+# Convenience compose file for the EDA Engine.
+#
+# Secrets come from the host environment (or an .env file beside this compose
+# file — env_file is gitignored). They are NOT baked into the image.
+#
+#   GROQ_API_KEY=sk-... docker compose up --build
+# or put GROQ_API_KEY / GROQ_MODEL in a local .env and run `docker compose up`.
+services:
+  eda-engine:
+    build: .
+    image: eda-engine:latest
+    ports:
+      - "8000:8000"
+    environment:
+      # Pass-through from the host shell; "" keeps the key absent if unset
+      # rather than failing the run (the LLM call errors clearly at request time).
+      GROQ_API_KEY: "${GROQ_API_KEY:-}"
+      GROQ_MODEL: "${GROQ_MODEL:-llama-3.3-70b-versatile}"
+      HOST: "0.0.0.0"
+      PORT: "8000"
+    # Optional: load the same vars from a local .env file if present.
+    # required:false so a checkout without .env still runs (Compose >= 2.24).
+    env_file:
+      - path: .env
+        required: false

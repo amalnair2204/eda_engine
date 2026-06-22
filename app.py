@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -650,3 +651,31 @@ async def serve_netlist(filename: str) -> FileResponse:
 # Mount static assets AFTER all named routes
 _FRONTEND_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(_FRONTEND_DIR)), name="static")
+
+
+# ---------------------------------------------------------------------------
+# Hosting entry-point (env-based host/port for containers / PaaS)
+# ---------------------------------------------------------------------------
+
+def _host_port() -> tuple[str, int]:
+    """Resolve the bind (host, port) from env for container / PaaS hosting.
+
+    Reads HOST (default "0.0.0.0") and PORT (default 8000).  A non-integer PORT
+    falls back to 8000 rather than crashing the server on a bad env value.
+
+    Returns:
+        (host, port) tuple suitable for uvicorn.run().
+    """
+    host = os.getenv("HOST", "0.0.0.0")
+    try:
+        port = int(os.getenv("PORT", "8000"))
+    except ValueError:
+        port = 8000
+    return host, port
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    _host, _port = _host_port()
+    uvicorn.run(app, host=_host, port=_port)

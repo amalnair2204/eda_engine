@@ -4,6 +4,7 @@
 > manufacturable PCB layout — through an 11-stage AI pipeline, served as a
 > full-stack web app with a grounded design copilot.
 
+[![CI](https://github.com/amalnair2204/eda_engine/actions/workflows/ci.yml/badge.svg)](https://github.com/amalnair2204/eda_engine/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.12-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688)
 ![Groq](https://img.shields.io/badge/LLM-Groq%20LLaMA%203.3%2070B-orange)
@@ -129,6 +130,51 @@ python -m uvicorn app:app --reload
 
 > `.env` holds a live Groq key and is gitignored. The Chroma vector store is a
 > runtime artifact rebuilt by `ingest_knowledge.py`, so it is not committed either.
+
+## Run with Docker
+
+The image is Linux-based (`python:3.12-slim`) and reads `HOST`/`PORT` from the
+environment. **Secrets are never baked into the image** — `GROQ_API_KEY` is
+passed at runtime.
+
+```bash
+# Build
+docker build -t eda-engine .
+
+# Run — pass the Groq key as a runtime env var (NOT in the image)
+docker run --rm -p 8000:8000 -e GROQ_API_KEY=your_groq_key eda-engine
+# open http://localhost:8000
+
+# Override the bind port if needed
+docker run --rm -p 9000:9000 -e PORT=9000 -e GROQ_API_KEY=your_groq_key eda-engine
+```
+
+Or with Docker Compose (reads `GROQ_API_KEY` / `GROQ_MODEL` from your shell or a
+local `.env`):
+
+```bash
+GROQ_API_KEY=your_groq_key docker compose up --build
+```
+
+The RAG embedding model downloads on first use into the container's
+`HF_HOME` cache. To pre-build the vector store inside the container, run
+`python ingest_knowledge.py` (e.g. `docker run --rm eda-engine python ingest_knowledge.py`
+with a mounted volume, or as a one-off start step).
+
+## Deployment
+
+The container runs anywhere that hosts a Docker image (Render, Railway, Fly.io,
+a VM, etc.). Generic recipe:
+
+- **Start command:** `uvicorn app:app --host 0.0.0.0 --port $PORT` (the image's
+  default `CMD` already does this; most PaaS inject `$PORT`).
+- **Required env var:** `GROQ_API_KEY` (set as a secret in the host's dashboard —
+  never commit it).
+- **Optional env vars:** `GROQ_MODEL` (default `llama-3.3-70b-versatile`),
+  `HOST` (default `0.0.0.0`), `PORT` (default `8000`).
+- **Note:** the image is large (torch + sentence-transformers). Pick an instance
+  with enough memory/disk; first request may be slow while the embedding model
+  downloads.
 
 ## Usage
 

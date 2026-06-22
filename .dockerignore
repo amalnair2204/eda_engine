@@ -1,0 +1,32 @@
+# Secrets — never copy into the image (passed at runtime via env)
+.env
+.env.*
+!.env.example
+
+# Python caches / build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Virtualenvs
+venv/
+.venv/
+
+# Runtime artifacts (regenerated in-container; keep image small)
+outputs/
+netlists/generated/
+vectorstore/
+.cache/
+models/
+
+# VCS / CI / local tooling
+.git/
+.github/
+.gitignore
+
+# Large standalone export not needed in the image
+EDA Engine - standalone.html

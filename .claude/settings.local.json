@@ -41,7 +41,17 @@
       "PowerShell(python -m pytest tests/test_phase0.py)",
       "PowerShell(python -m pytest tests/test_phase11.py -v 2>&1 | Select-Object -Last 60)",
       "PowerShell(python -m pytest tests/ 2>&1 | Select-Object -Last 40)",
-      "PowerShell(python -m pytest -q 2>&1 | Select-Object -Last 8)"
+      "PowerShell(python -m pytest -q 2>&1 | Select-Object -Last 8)",
+      "Bash(git commit -q -m ' *)",
+      "Bash(git push *)",
+      "Bash(gh run *)",
+      "WebFetch(domain:api.github.com)",
+      "Bash(git add *)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:github.com)",
+      "Bash(python -m pytest --collect-only -q)",
+      "Bash(python make_snapshot.py)",
+      "Bash(awk '{print $5\"  \"$9}')"
     ]
   }
 }

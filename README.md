@@ -1,7 +1,7 @@
 # AI-Accelerated EDA Placement & Routing Engine
 
 > Turn a plain-English circuit description into an optimized, fully-routed,
-> manufacturable PCB layout — through an 11-stage AI pipeline, served as a
+> manufacturable PCB layout — through a 12-stage AI pipeline, served as a
 > full-stack web app with a grounded design copilot.
 
 [![CI](https://github.com/amalnair2204/eda_engine/actions/workflows/ci.yml/badge.svg)](https://github.com/amalnair2204/eda_engine/actions/workflows/ci.yml)
@@ -40,16 +40,18 @@ and full-stack delivery in one coherent system.
 
 ```
 Plain-English prompt
-  → Phase 0   Groq (LLaMA 3.3 70B)         →  JSON netlist
-  → Phase 1   Parser + CircuitGraph
-  → Phase 2/7 Placement      ┌ Genetic Algorithm  (near-optimal global search)
-                             └ RL Agent (PPO)      (fast amortized inference)
-  → Phase 3/8 Routing        ┌ Single-layer Lee's maze router
-                             └ Multi-layer + vias  (0 same-layer crossings)
-  → Phase 4   Analytics (HPWL, per-layer crossings, vias, parasitics, DRC/ERC)
-  → Phase 9   Manufacturing export (Gerber RS-274X · Excellon · BOM · KiCad)
-  → Phase 5/6 FastAPI + WebSocket web app at localhost:8000
-  → Phase 10  RAG design copilot (grounded, cited answers over datasheets)
+  → Phase 0    Groq (LLaMA 3.3 70B)         →  JSON netlist
+  → Phase 1    Parser + CircuitGraph
+  → Phase 2/7  Placement      ┌ Genetic Algorithm  (near-optimal global search)
+                              └ RL Agent (PPO)      (fast amortized inference)
+  → Phase 3/8  Routing        ┌ Single-layer Lee's maze router
+                              └ Multi-layer + vias  (0 same-layer crossings)
+  → Phase 4    Analytics (HPWL, per-layer crossings, vias, parasitics, DRC/ERC)
+  → Phase 9    Manufacturing export (Gerber RS-274X · Excellon · BOM · KiCad)
+  → Phase 5/6  FastAPI + WebSocket web app at localhost:8000
+  → Phase 10   RAG design copilot (grounded, cited answers over datasheets)
+  → Phase 11   Design-space exploration (Pareto-optimal layout search)
+  → Phase 12   Docker + CI/CD deployment
 ```
 
 Placement strategy (`ga` | `rl`) and router (`single` | `multi`) are selectable
@@ -86,9 +88,13 @@ amortized speed.
 - **RAG design copilot** — ask "suggest a lower-power alternative for U1" and get a
   cited answer grounded in a datasheet knowledge base plus your *current* design.
   Refuses to fabricate specs not in the knowledge base.
+- **Design-space exploration** — sweeps placer × router × parameters, computes the
+  Pareto-optimal set across HPWL, crossings, trace length, and runtime, and
+  recommends a tradeoff.
 - **Deterministic guardrails** — datasheet-sourced pinouts (never LLM-inferred);
   auto-injected decoupling caps; DRC/ERC checks.
-- **Full-stack** — FastAPI + WebSocket backend, browser UI, real-time progress.
+- **Full-stack & deployable** — FastAPI + WebSocket backend, browser UI, real-time
+  progress, containerized with Docker and CI/CD on GitHub Actions.
 
 ## Tech Stack
 
@@ -101,6 +107,7 @@ amortized speed.
 | Manufacturing | gerbonara (Gerber / Excellon / render) |
 | RAG | sentence-transformers (embeddings), ChromaDB (vector store), pypdf |
 | API / UI | FastAPI, Uvicorn, WebSockets, HTML/CSS/JS |
+| Deploy | Docker (python:3.12-slim), GitHub Actions CI |
 | Viz & tests | Matplotlib, Pytest (122 tests) |
 
 ## Getting Started
@@ -209,6 +216,7 @@ eda_engine/
 ├── phase8_multilayer_router.py   # Multi-layer routing + vias
 ├── phase9_export.py              # Gerber / Excellon / BOM / KiCad export
 ├── phase10_rag_copilot.py        # Grounded RAG copilot
+├── phase11_explorer.py           # Design-space exploration (Pareto search)
 ├── train_phase7_rl.py            # RL training entrypoint
 ├── ingest_knowledge.py           # Build the copilot's vector store
 ├── benchmark_placement.py        # GA vs RL vs random
@@ -218,6 +226,9 @@ eda_engine/
 ├── knowledge/                    # Datasheet / design-rule corpus (RAG source)
 ├── models/                       # Trained RL policy
 ├── tests/                        # 122 pytest tests
+├── Dockerfile                    # Container image (python:3.12-slim)
+├── docker-compose.yml            # Single-service local stack
+├── .github/workflows/ci.yml      # GitHub Actions CI
 ├── CLAUDE.md                     # Architecture + conventions (single source of truth)
 └── requirements.txt
 ```
@@ -231,7 +242,7 @@ eda_engine/
 - Designing around LLM failure modes (hallucinated pins, fabricated specs) with
   deterministic guardrails and a grounded, cited RAG layer.
 - End-to-end delivery: algorithm core → FastAPI service → real-time web UI →
-  manufacturable output.
+  manufacturable output → containerized deployment.
 
 ## License
 

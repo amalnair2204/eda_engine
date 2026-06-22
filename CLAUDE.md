@@ -74,6 +74,12 @@ Plain English Prompt
 | 4     | Analytics Engine              | phase4_analytics.py         | ✅ Complete    |
 | 5     | UI Shell (Claude Design)      | frontend/                   | ✅ Complete    |
 | 6     | Full Integration              | app.py                      | ✅ Complete    |
+| 7     | RL Placement Agent (PPO)      | phase7_rl_placer.py         | ✅ Complete    |
+| 8     | Multi-Layer Router + Vias     | phase8_multilayer_router.py | ✅ Complete    |
+| 9     | Manufacturing Export          | phase9_export.py            | ✅ Complete    |
+| 10    | RAG Design Copilot            | phase10_rag_copilot.py      | ✅ Complete    |
+| 11    | Design-Space Exploration      | phase11_explorer.py         | ✅ Complete    |
+| 12    | Docker + CI/CD Deployment     | Dockerfile, .github/        | ✅ Complete    |
 
 **Update this table at the end of every phase.**
 

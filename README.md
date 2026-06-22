@@ -9,7 +9,7 @@
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688)
 ![Groq](https://img.shields.io/badge/LLM-Groq%20LLaMA%203.3%2070B-orange)
 ![RL](https://img.shields.io/badge/RL-PPO%20(SB3)-red)
-![Tests](https://img.shields.io/badge/tests-108%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-122%20passing-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
 ---
@@ -101,7 +101,7 @@ amortized speed.
 | Manufacturing | gerbonara (Gerber / Excellon / render) |
 | RAG | sentence-transformers (embeddings), ChromaDB (vector store), pypdf |
 | API / UI | FastAPI, Uvicorn, WebSockets, HTML/CSS/JS |
-| Viz & tests | Matplotlib, Pytest (108 tests) |
+| Viz & tests | Matplotlib, Pytest (122 tests) |
 
 ## Getting Started
 
@@ -217,7 +217,7 @@ eda_engine/
 ├── frontend/                     # Web UI
 ├── knowledge/                    # Datasheet / design-rule corpus (RAG source)
 ├── models/                       # Trained RL policy
-├── tests/                        # 108 pytest tests
+├── tests/                        # 122 pytest tests
 ├── CLAUDE.md                     # Architecture + conventions (single source of truth)
 └── requirements.txt
 ```

@@ -4,6 +4,9 @@ __pycache__/
 *.pyo
 outputs/
 
+# Regenerable code dump (make_snapshot.py)
+codebase_snapshot.md
+
 # Runtime Groq outputs (regenerated per run)
 netlists/generated/
 .pytest_cache/

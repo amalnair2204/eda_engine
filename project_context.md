@@ -127,8 +127,7 @@ None are required for correctness; these are natural follow-ons:
 1. **Demo assets** — README references `docs/ui.png`, `docs/routing.png`, `docs/gerber_preview.png` (commented out). Capture and add screenshots, uncomment the Demo section.
 2. **Surface Phase 11 in the UI more richly** — the "Explore design space" button exists; could render the Pareto scatter (`phase11_pareto.png`) inline rather than just the table.
 3. **Deployment dry-run** — actually deploy the container to a PaaS (Render/Railway/Fly.io) and confirm `$PORT` injection + `GROQ_API_KEY` secret wiring end-to-end.
-4. **Test count badge** — README badge still says "108 passing"; real count is **122**. Update for accuracy.
-5. **Consider committing a small pre-trained RL model** or documenting the retrain step more prominently, so cloners don't silently lose RL placement.
+4. **Consider committing a small pre-trained RL model** or documenting the retrain step more prominently, so cloners don't silently lose RL placement.
 
 ---
 
